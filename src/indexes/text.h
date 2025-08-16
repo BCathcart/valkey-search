@@ -57,6 +57,10 @@ class Text : public IndexBase {
   InternedStringPtr GetRawValue(const InternedStringPtr& key) const
       ABSL_NO_THREAD_SAFETY_ANALYSIS;
 
+  bool GetWithSuffixTrie() const { return with_suffix_trie_; }
+  bool GetNoStem() const { return no_stem_; }
+  int32_t GetMinStemSize() const { return min_stem_size_; }
+
  public:
   class EntriesFetcherIterator : public EntriesFetcherIteratorBase {
    public:
