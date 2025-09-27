@@ -181,3 +181,19 @@ target_include_directories(text_index_test PUBLIC ${CMAKE_CURRENT_LIST_DIR})
 target_link_libraries(text_index_test PRIVATE testing_common_base)
 target_link_libraries(text_index_test PRIVATE text)
 finalize_test_flags(text_index_test)
+
+# 8. Tree Performance Test Suite
+add_executable(tree_perf_test 
+    ${CMAKE_CURRENT_LIST_DIR}/tree_perf_test.cc)
+target_include_directories(tree_perf_test PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+target_link_libraries(tree_perf_test PRIVATE testing_common_base)
+target_link_libraries(tree_perf_test PRIVATE text)
+finalize_test_flags(tree_perf_test)
+
+# 9. Iteration Profiling Test
+add_executable(iteration_profile_test 
+    ${CMAKE_CURRENT_LIST_DIR}/iteration_profile_test.cc)
+target_include_directories(iteration_profile_test PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+target_link_libraries(iteration_profile_test PRIVATE testing_common_base)
+target_link_libraries(iteration_profile_test PRIVATE text)
+finalize_test_flags(iteration_profile_test)

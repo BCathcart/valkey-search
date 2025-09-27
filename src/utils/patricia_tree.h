@@ -140,7 +140,7 @@ class PatriciaTree {
       if (node == nullptr) {
         return;
       }
-      DfsHelper(node);
+      DfsHelper(node, "");
     }
 
     bool Done() const { return values_.empty(); }
@@ -151,17 +151,19 @@ class PatriciaTree {
       }
     }
 
-    PatriciaNodeType *Value() const { return values_.top(); }
+    PatriciaNodeType *Value() const { return values_.top().first; }
+    
+    absl::string_view GetWord() const { return values_.top().second; }
 
    private:
-    std::stack<PatriciaNodeType *> values_;
+    std::stack<std::pair<PatriciaNodeType *, std::string>> values_;
 
-    void DfsHelper(PatriciaNodeType *node) {
+    void DfsHelper(PatriciaNodeType *node, const std::string& current_word) {
       if (node->value.has_value()) {
-        values_.push(node);
+        values_.push({node, current_word});
       }
       for (const auto &[child_key, child_node] : node->children) {
-        DfsHelper(child_node.get());
+        DfsHelper(child_node.get(), current_word + child_key);
       }
     }
   };
