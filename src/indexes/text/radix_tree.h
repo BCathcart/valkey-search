@@ -64,6 +64,7 @@ into the codebase efficiently enough to be deployed in production code.
 #include <tuple>
 #include <variant>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/functional/function_ref.h"
 #include "absl/log/check.h"
 #include "absl/strings/string_view.h"
@@ -177,10 +178,10 @@ struct RadixTree {
    */
   struct Node;
   using NodeChildren =
-      std::variant<std::monostate,                             // Leaf node
-                   std::map<Byte, std::unique_ptr<Node>>,      // Branching node
-                   std::pair<BytePath, std::unique_ptr<Node>>  // Compressed
-                                                               // node
+      std::variant<std::monostate,                                    // Leaf node
+                   absl::flat_hash_map<Byte, std::unique_ptr<Node>>,  // Branching node
+                   std::pair<BytePath, std::unique_ptr<Node>>         // Compressed
+                                                                      // node
                    >;
   struct Node {
     uint32_t sub_tree_count;
@@ -246,7 +247,7 @@ struct RadixTree {
     friend struct RadixTree;
     explicit WordIterator(const Node* node, absl::string_view prefix);
 
-    using MapIterator = std::map<Byte, std::unique_ptr<Node>>::const_iterator;
+    using MapIterator = absl::flat_hash_map<Byte, std::unique_ptr<Node>>::const_iterator;
     std::deque<std::tuple<uint32_t,     // depth
                           MapIterator,  // next sibling iterator
                           MapIterator   // end iterator
@@ -316,7 +317,7 @@ void RadixTree<Target, reverse>::Mutate(
               n->children = std::pair{BytePath(remaining), std::move(new_leaf)};
               remaining.remove_prefix(remaining.length());
             },
-            [&](std::map<Byte, std::unique_ptr<Node>>& children) {
+            [&](absl::flat_hash_map<Byte, std::unique_ptr<Node>>& children) {
               // Branch case - look for branch matching the first byte
               const auto it = children.find(remaining[0]);
               if (it != children.end()) {
@@ -345,7 +346,7 @@ void RadixTree<Target, reverse>::Mutate(
                 remaining.remove_prefix(match);
               } else if (match == 0) {
                 // No match - convert the current node to a branch node
-                auto new_branches = std::map<Byte, std::unique_ptr<Node>>();
+                auto new_branches = absl::flat_hash_map<Byte, std::unique_ptr<Node>>();
 
                 // Create a branch for the existing path
                 if (path.length() == 1) {
@@ -396,7 +397,7 @@ void RadixTree<Target, reverse>::Mutate(
                      // Leaf case - We need to trim the branch from the tree
                      TrimBranchFromTree(word, node_path);
                    },
-                   [&](const std::map<Byte, std::unique_ptr<Node>>& children) {
+                   [&](const absl::flat_hash_map<Byte, std::unique_ptr<Node>>& children) {
                      // Branch case - Target node is a branching node and still
                      // belongs in the tree as is
                    },
@@ -435,7 +436,7 @@ void RadixTree<Target, reverse>::TrimBranchFromTree(
               CHECK(false) << "We don't expect to hit a leaf while "
                               "traversing up the tree";
             },
-            [&](std::map<Byte, std::unique_ptr<Node>>& children) {
+            [&](absl::flat_hash_map<Byte, std::unique_ptr<Node>>& children) {
               children.erase(remaining.back());
               if (children.size() > 1) {
                 // Keep the branching node as is
@@ -547,7 +548,7 @@ RadixTree<Target, reverse>::GetWordIterator(absl::string_view prefix) const {
     std::visit(
         overloaded{
             [&](const std::monostate&) { no_match = true; },
-            [&](const std::map<Byte, std::unique_ptr<Node>>& children) {
+                   [&](const absl::flat_hash_map<Byte, std::unique_ptr<Node>>& children) {
               const auto it = children.find(remaining[0]);
               if (it != children.end()) {
                 n = it->second.get();
@@ -621,7 +622,7 @@ void RadixTree<Target, reverse>::WordIterator::Next() {
               word_.resize(word_.size() - depth);
               word_ += it->first;
             },
-            [&](const std::map<Byte, std::unique_ptr<Node>>& children) {
+            [&](const absl::flat_hash_map<Byte, std::unique_ptr<Node>>& children) {
               auto it = children.begin();
               if (std::next(it) != children.end()) {
                 // There are more siblings to search
@@ -724,7 +725,7 @@ std::vector<std::string> RadixTree<Target, reverse>::DebugGetTreeString(
                    if (node->target.has_value()) line += " [T]";
                    result.push_back(line);
                  },
-                 [&](const std::map<Byte, std::unique_ptr<Node>>& children) {
+                 [&](const absl::flat_hash_map<Byte, std::unique_ptr<Node>>& children) {
                    line += " BRANCH(" + std::to_string(children.size()) + ")";
                    if (node->target.has_value()) line += " [T]";
                    result.push_back(line);
