@@ -77,7 +77,8 @@ class TextTest : public ::testing::Test {
   bool TokenExists(const std::string& token,
                    std::shared_ptr<text::TextIndexSchema> schema = nullptr) {
     auto active_schema = schema ? schema : text_index_schema_;
-    auto iter = active_schema->GetTextIndex()->GetPrefix().GetWordIterator(token);
+    auto iter =
+        active_schema->GetTextIndex()->GetPrefix().GetWordIterator(token);
     return !iter.Done();
   }
 
@@ -86,7 +87,8 @@ class TextTest : public ::testing::Test {
       const std::string& token,
       std::shared_ptr<text::TextIndexSchema> schema = nullptr) {
     auto active_schema = schema ? schema : text_index_schema_;
-    auto iter = active_schema->GetTextIndex()->GetPrefix().GetWordIterator(token);
+    auto iter =
+        active_schema->GetTextIndex()->GetPrefix().GetWordIterator(token);
     if (iter.Done()) {
       return nullptr;
     }
