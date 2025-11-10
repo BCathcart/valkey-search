@@ -62,22 +62,15 @@ class TextIndex {
   // strategies are possible. TBD (a shared-ed word lock table should work well)
   //
 
-  static constexpr uintptr_t HAS_SUFFIX = 0x1;
-  static_assert(
-      alignof(RadixTree<std::shared_ptr<Postings>>) >= 2,
-      "RadixTree must be at least 2-byte aligned for pointer tagging");
-
  public:
   explicit TextIndex(bool with_suffix);
-  ~TextIndex();
   RadixTree<std::shared_ptr<Postings>>& GetPrefix();
   std::optional<std::reference_wrapper<RadixTree<std::shared_ptr<Postings>>>>
   GetSuffix();
 
  private:
-  RadixTree<std::shared_ptr<Postings>>* GetCleanPtr() const;
-
-  RadixTree<std::shared_ptr<Postings>>* trees_;
+  RadixTree<std::shared_ptr<Postings>> prefix_tree_;
+  std::unique_ptr<RadixTree<std::shared_ptr<Postings>>> suffix_tree_;
 };
 
 class TextIndexSchema {

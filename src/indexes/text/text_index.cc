@@ -90,33 +90,21 @@ std::optional<std::shared_ptr<Postings>> RemoveKeyFromPostings(
 
 /*** TextIndex ***/
 
-TextIndex::TextIndex(bool suffix) {
-  if (suffix) {
-    trees_ = new RadixTree<std::shared_ptr<Postings>>[2];
-    trees_ = reinterpret_cast<RadixTree<std::shared_ptr<Postings>>*>(
-        reinterpret_cast<uintptr_t>(trees_) | HAS_SUFFIX);
-  } else {
-    trees_ = new RadixTree<std::shared_ptr<Postings>>[1];
-  }
-}
-
-TextIndex::~TextIndex() { delete[] GetCleanPtr(); }
+TextIndex::TextIndex(bool with_suffix)
+    : suffix_tree_(with_suffix
+                       ? std::make_unique<RadixTree<std::shared_ptr<Postings>>>()
+                       : nullptr) {}
 
 RadixTree<std::shared_ptr<Postings>>& TextIndex::GetPrefix() {
-  return GetCleanPtr()[0];
+  return prefix_tree_;
 }
 
 std::optional<std::reference_wrapper<RadixTree<std::shared_ptr<Postings>>>>
 TextIndex::GetSuffix() {
-  if (!(reinterpret_cast<uintptr_t>(trees_) & HAS_SUFFIX)) {
+  if (!suffix_tree_) {
     return std::nullopt;
   }
-  return std::ref(GetCleanPtr()[1]);
-}
-
-RadixTree<std::shared_ptr<Postings>>* TextIndex::GetCleanPtr() const {
-  return reinterpret_cast<RadixTree<std::shared_ptr<Postings>>*>(
-      reinterpret_cast<uintptr_t>(trees_) & ~HAS_SUFFIX);
+  return std::ref(*suffix_tree_);
 }
 
 /*** TextIndexSchema ***/
@@ -234,17 +222,16 @@ void TextIndexSchema::DeleteKeyData(const InternedStringPtr& key) {
   NestedMemoryScope scope{metadata_.text_index_memory_pool_};
 
   // Extract the per-key index
-  std::optional<TextIndex> key_index_opt;
+  absl::node_hash_map<Key, TextIndex>::node_type node;
   {
     std::lock_guard<std::mutex> per_key_guard(per_key_text_indexes_mutex_);
-    auto node = per_key_text_indexes_.extract(key);
+    node = per_key_text_indexes_.extract(key);
     if (node.empty()) {
       return;
     }
-    key_index_opt = std::move(node.mapped());
   }
 
-  TextIndex& key_index = key_index_opt.value();
+  TextIndex& key_index = node.mapped();
 
   auto iter = key_index.GetPrefix().GetWordIterator("");
 
