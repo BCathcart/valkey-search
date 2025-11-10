@@ -234,15 +234,17 @@ void TextIndexSchema::DeleteKeyData(const InternedStringPtr& key) {
   NestedMemoryScope scope{metadata_.text_index_memory_pool_};
 
   // Extract the per-key index
-  TextIndex key_index;
+  std::optional<TextIndex> key_index_opt;
   {
     std::lock_guard<std::mutex> per_key_guard(per_key_text_indexes_mutex_);
     auto node = per_key_text_indexes_.extract(key);
     if (node.empty()) {
       return;
     }
-    key_index = std::move(node.mapped());
+    key_index_opt = std::move(node.mapped());
   }
+
+  TextIndex& key_index = key_index_opt.value();
 
   auto iter = key_index.GetPrefix().GetWordIterator("");
 

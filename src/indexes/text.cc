@@ -169,7 +169,8 @@ std::unique_ptr<indexes::text::TextIterator> SuffixPredicate::BuildTextIterator(
       << "Text index does not have suffix trie enabled.";
   std::string reversed_word(GetTextString().rbegin(), GetTextString().rend());
   auto word_iter =
-      fetcher->text_index_->GetSuffix().value().get()->GetWordIterator(reversed_word);
+      fetcher->text_index_->GetSuffix().value().get().GetWordIterator(
+          reversed_word);
   std::vector<indexes::text::Postings::KeyIterator> key_iterators;
   while (!word_iter.Done()) {
     key_iterators.emplace_back(word_iter.GetTarget()->GetKeyIterator());
