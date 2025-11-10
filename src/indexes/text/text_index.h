@@ -49,7 +49,7 @@ struct TextIndexMetadata {
   MemoryPool text_index_memory_pool_{0};
 };
 
-struct TextIndex {
+class TextIndex {
   //
   // The main query data structure maps Words into Postings objects. This
   // is always done with a prefix tree. Optionally, a suffix tree can also be
@@ -61,8 +61,23 @@ struct TextIndex {
   // becomes responsible for cross-tree locking issues. Multiple locking
   // strategies are possible. TBD (a shared-ed word lock table should work well)
   //
-  RadixTree<std::shared_ptr<Postings>, false> prefix_;
-  std::optional<RadixTree<std::shared_ptr<Postings>, true>> suffix_;
+
+  static constexpr uintptr_t HAS_SUFFIX = 0x1;
+  static_assert(
+      alignof(RadixTree<std::shared_ptr<Postings>>) >= 2,
+      "RadixTree must be at least 2-byte aligned for pointer tagging");
+
+ public:
+  explicit TextIndex(bool with_suffix);
+  ~TextIndex();
+  RadixTree<std::shared_ptr<Postings>>& GetPrefix();
+  std::optional<std::reference_wrapper<RadixTree<std::shared_ptr<Postings>>>>
+  GetSuffix();
+
+ private:
+  RadixTree<std::shared_ptr<Postings>>* GetCleanPtr() const;
+
+  RadixTree<std::shared_ptr<Postings>>* trees_;
 };
 
 class TextIndexSchema {
@@ -87,6 +102,12 @@ class TextIndexSchema {
   // Access to metadata for memory pool usage
   TextIndexMetadata& GetMetadata() { return metadata_; }
 
+  // Enaable suffix trie.
+  void EnableSuffix() {
+    with_suffix_trie_ = true;
+    text_index_ = std::make_shared<TextIndex>(true);
+  }
+
  private:
   uint8_t num_text_fields_ = 0;
 
@@ -96,7 +117,7 @@ class TextIndexSchema {
   //
   // This is the main index of all Text fields in this index schema
   //
-  std::shared_ptr<TextIndex> text_index_ = std::make_shared<TextIndex>();
+  std::shared_ptr<TextIndex> text_index_ = std::make_shared<TextIndex>(false);
 
   // Prevent concurrent mutations to schema-level text index
   // TODO: develop a finer-grained TextIndex locking scheme
@@ -127,6 +148,9 @@ class TextIndexSchema {
 
   // Whether to store position offsets for phrase queries
   bool with_offsets_ = false;
+
+  // True if any text attributes of the schema have suffix search enabled.
+  bool with_suffix_trie_ = false;
 
  public:
   // FT.INFO memory stats for text index
