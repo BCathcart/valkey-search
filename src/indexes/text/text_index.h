@@ -63,7 +63,7 @@ class TextIndex {
   //
 
  public:
-  explicit TextIndex(bool with_suffix);
+  explicit TextIndex(bool suffix);
   RadixTree<std::shared_ptr<Postings>>& GetPrefix();
   std::optional<std::reference_wrapper<RadixTree<std::shared_ptr<Postings>>>>
   GetSuffix();
@@ -95,7 +95,7 @@ class TextIndexSchema {
   // Access to metadata for memory pool usage
   TextIndexMetadata& GetMetadata() { return metadata_; }
 
-  // Enaable suffix trie.
+  // Enable suffix trie.
   void EnableSuffix() {
     with_suffix_trie_ = true;
     text_index_ = std::make_shared<TextIndex>(true);

@@ -90,10 +90,10 @@ std::optional<std::shared_ptr<Postings>> RemoveKeyFromPostings(
 
 /*** TextIndex ***/
 
-TextIndex::TextIndex(bool with_suffix)
-    : suffix_tree_(with_suffix
-                       ? std::make_unique<RadixTree<std::shared_ptr<Postings>>>()
-                       : nullptr) {}
+TextIndex::TextIndex(bool suffix)
+    : suffix_tree_(
+          suffix ? std::make_unique<RadixTree<std::shared_ptr<Postings>>>()
+                 : nullptr) {}
 
 RadixTree<std::shared_ptr<Postings>>& TextIndex::GetPrefix() {
   return prefix_tree_;
