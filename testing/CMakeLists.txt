@@ -173,6 +173,7 @@ add_executable(text_index_test
     ${CMAKE_CURRENT_LIST_DIR}/text_index_schema_test.cc
     ${CMAKE_CURRENT_LIST_DIR}/invasive_ptr_sizeof_test.cc)
 target_include_directories(text_index_test PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+target_include_directories(text_index_test PUBLIC ${CMAKE_SOURCE_DIR}/unodb)
 target_link_libraries(text_index_test PRIVATE testing_common_base)
 target_link_libraries(text_index_test PRIVATE text)
 finalize_test_flags(text_index_test)
