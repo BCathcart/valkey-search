@@ -113,8 +113,7 @@ class RadixPerformanceTest : public ::testing::Test {
     // 4. IsolatedMemoryScope tracks system allocations properly
     radix_tree_ = RadixTree<TestTarget>{};
     rax_tree_ = raxNew();
-    unodb_tree_ = std::make_unique<unodb::db<std::uint64_t, unodb::value_view>>();
-    unodb_string_tree_ = std::make_unique<unodb::db<unodb::key_view, unodb::value_view>>();
+    unodb_tree_ = std::make_unique<unodb::db<unodb::key_view, unodb::value_view>>();
   }
 
   void TearDown() override {
@@ -123,7 +122,6 @@ class RadixPerformanceTest : public ::testing::Test {
       rax_tree_ = nullptr;
     }
     unodb_tree_.reset();
-    unodb_string_tree_.reset();
   }
 
   // Benchmark helper
@@ -149,9 +147,9 @@ class RadixPerformanceTest : public ::testing::Test {
   }
 
   void PrintResults(const std::string& operation, double radix_time,
-                   double rax_time, double unodb_time, double unodb_str_time,
+                   double rax_time, double unodb_time,
                    int64_t radix_mem, int64_t rax_mem,
-                   int64_t unodb_mem, int64_t unodb_str_mem,
+                   int64_t unodb_mem,
                    size_t count) {
     // Format all values as strings with suffixes first
     std::ostringstream oss;
@@ -160,11 +158,9 @@ class RadixPerformanceTest : public ::testing::Test {
     oss.str(""); oss << radix_time << " ms"; std::string radix_str = oss.str();
     oss.str(""); oss << rax_time << " ms"; std::string rax_str = oss.str();
     oss.str(""); oss << unodb_time << " ms"; std::string unodb_str = oss.str();
-    oss.str(""); oss << unodb_str_time << " ms"; std::string unodb_s_str = oss.str();
     oss.str(""); oss << (radix_mem / 1024) << " KB"; std::string radix_mem_str = oss.str();
     oss.str(""); oss << (rax_mem / 1024) << " KB"; std::string rax_mem_str = oss.str();
     oss.str(""); oss << (unodb_mem / 1024) << " KB"; std::string unodb_mem_str = oss.str();
-    oss.str(""); oss << (unodb_str_mem / 1024) << " KB"; std::string unodb_s_mem_str = oss.str();
     oss.str(""); oss << count << " ops"; std::string count_str = oss.str();
     
     // Now output with consistent 15-char width for each column
@@ -172,17 +168,15 @@ class RadixPerformanceTest : public ::testing::Test {
               << std::right << std::setw(15) << radix_str << " | "
               << std::setw(15) << rax_str << " | "
               << std::setw(15) << unodb_str << " | "
-              << std::setw(15) << unodb_s_str << " | "
               << std::setw(15) << radix_mem_str << " | "
               << std::setw(15) << rax_mem_str << " | "
               << std::setw(15) << unodb_mem_str << " | "
-              << std::setw(15) << unodb_s_mem_str << " | "
               << std::setw(15) << count_str << "\n";
   }
 
   // Version without memory columns (for tests that don't track memory)
   void PrintResultsNoMem(const std::string& operation, double radix_time,
-                         double rax_time, double unodb_time, double unodb_str_time,
+                         double rax_time, double unodb_time,
                          size_t count) {
     // Format all values as strings with suffixes first
     std::ostringstream oss;
@@ -191,7 +185,6 @@ class RadixPerformanceTest : public ::testing::Test {
     oss.str(""); oss << radix_time << " ms"; std::string radix_str = oss.str();
     oss.str(""); oss << rax_time << " ms"; std::string rax_str = oss.str();
     oss.str(""); oss << unodb_time << " ms"; std::string unodb_str = oss.str();
-    oss.str(""); oss << unodb_str_time << " ms"; std::string unodb_s_str = oss.str();
     oss.str(""); oss << count << " ops"; std::string count_str = oss.str();
     
     // Output without memory columns
@@ -199,20 +192,17 @@ class RadixPerformanceTest : public ::testing::Test {
               << std::right << std::setw(15) << radix_str << " | "
               << std::setw(15) << rax_str << " | "
               << std::setw(15) << unodb_str << " | "
-              << std::setw(15) << unodb_s_str << " | "
               << std::setw(15) << count_str << "\n";
   }
 
   RadixTree<TestTarget> radix_tree_;
   rax* rax_tree_;
-  std::unique_ptr<unodb::db<std::uint64_t, unodb::value_view>> unodb_tree_;
-  std::unique_ptr<unodb::db<unodb::key_view, unodb::value_view>> unodb_string_tree_;
+  std::unique_ptr<unodb::db<unodb::key_view, unodb::value_view>> unodb_tree_;
   
   // Memory pools for tracking each tree's memory usage
   MemoryPool radix_memory_;
   MemoryPool rax_memory_;
   MemoryPool unodb_memory_;
-  MemoryPool unodb_str_memory_;
 };
 
 // Test 1: Sequential Insertion (with Memory Tracking)
@@ -224,11 +214,11 @@ TEST_F(RadixPerformanceTest, SequentialInsertion) {
     std::cout << "\n--- " << (mode == DataMode::RANDOM_BYTES ? "Random Bytes (0-255)" : "UTF-8 Text") << " ---\n";
     std::cout << std::left << std::setw(20) << "Operation" << " | "
               << std::setw(15) << "RadixTree" << " | " << std::setw(15) << "Rax"
-              << " | " << std::setw(15) << "UnoDB(hash)" << " | " << std::setw(15) << "UnoDB(str)"
-              << " | " << std::setw(15) << "RT Mem" << " | " << std::setw(15) << "Rax Mem" << " | "
-              << std::setw(15) << "UDB(h) Mem" << " | " << std::setw(15) << "UDB(s) Mem" << " | "
-              << std::setw(15) << "Count" << "\n";
-    std::cout << std::string(200, '-') << "\n";
+              << " | " << std::setw(15) << "UnoDB"
+              << " | " << std::setw(15) << "RT Mem" << " | " << std::setw(15) << "Rax Mem"
+              << " | " << std::setw(15) << "UnoDB Mem"
+              << " | " << std::setw(15) << "Count" << "\n";
+    std::cout << std::string(155, '-') << "\n";
 
     std::vector<size_t> sizes = {1000, 5000, 10000};
     
@@ -239,7 +229,6 @@ TEST_F(RadixPerformanceTest, SequentialInsertion) {
       radix_memory_.Reset();
       rax_memory_.Reset();
       unodb_memory_.Reset();
-      unodb_str_memory_.Reset();
 
       // RadixTree insertion with memory tracking
       int64_t radix_mem = 0;
@@ -268,44 +257,24 @@ TEST_F(RadixPerformanceTest, SequentialInsertion) {
       });
       rax_mem = rax_memory_.GetUsage();
 
-      // UnoDB insertion (hash-based) with memory tracking
+      // UnoDB insertion (string keys with encoding) with memory tracking
       int64_t unodb_mem = 0;
       std::vector<int*> unodb_values;
       double unodb_time = BenchmarkMs([&]() {
         IsolatedMemoryScope scope(unodb_memory_);
-        unodb_tree_ = std::make_unique<unodb::db<std::uint64_t, unodb::value_view>>();
+        unodb_tree_ = std::make_unique<unodb::db<unodb::key_view, unodb::value_view>>();
+        unodb::key_encoder encoder;
         for (size_t i = 0; i < test_data.size(); ++i) {
           int* value = new int(i);
           unodb_values.push_back(value);
-          std::uint64_t key = std::hash<std::string>{}(test_data[i]);
+          auto key = EncodeString(encoder, test_data[i]);
           unodb_tree_->insert(key, unodb::value_view{reinterpret_cast<const std::byte*>(value), sizeof(int)});
         }
       });
       unodb_mem = unodb_memory_.GetUsage();
 
-      // UnoDB insertion (string keys with encoding) with memory tracking
-      int64_t unodb_str_mem = 0;
-      std::vector<int*> unodb_str_values;
-      double unodb_str_time = BenchmarkMs([&]() {
-        IsolatedMemoryScope scope(unodb_str_memory_);
-        unodb_string_tree_ = std::make_unique<unodb::db<unodb::key_view, unodb::value_view>>();
-        unodb::key_encoder encoder;
-        for (size_t i = 0; i < test_data.size(); ++i) {
-          int* value = new int(i);
-          unodb_str_values.push_back(value);
-          auto key = EncodeString(encoder, test_data[i]);
-          unodb_string_tree_->insert(key, unodb::value_view{reinterpret_cast<const std::byte*>(value), sizeof(int)});
-        }
-      });
-      unodb_str_mem = unodb_str_memory_.GetUsage();
-
-      PrintResults("Insert " + std::to_string(size), radix_time, rax_time, unodb_time, unodb_str_time,
-                   radix_mem, rax_mem, unodb_mem, unodb_str_mem, size);
-
-    // Cleanup UnoDB string values
-    for (auto* val : unodb_str_values) {
-      delete val;
-    }
+      PrintResults("Insert " + std::to_string(size), radix_time, rax_time, unodb_time,
+                   radix_mem, rax_mem, unodb_mem, size);
 
     // Cleanup UnoDB values
     for (auto* val : unodb_values) {
@@ -332,11 +301,11 @@ TEST_F(RadixPerformanceTest, InsertionWithPrefixes) {
     std::cout << "\n--- " << (mode == DataMode::RANDOM_BYTES ? "Random Bytes (0-255)" : "UTF-8 Text") << " ---\n";
     std::cout << std::left << std::setw(20) << "Operation" << " | "
               << std::setw(15) << "RadixTree" << " | " << std::setw(15) << "Rax"
-              << " | " << std::setw(15) << "UnoDB(hash)" << " | " << std::setw(15) << "UnoDB(str)"
-              << " | " << std::setw(15) << "RT Mem" << " | " << std::setw(15) << "Rax Mem" << " | "
-              << std::setw(15) << "UDB(h) Mem" << " | " << std::setw(15) << "UDB(s) Mem" << " | "
-              << std::setw(15) << "Count" << "\n";
-    std::cout << std::string(200, '-') << "\n";
+              << " | " << std::setw(15) << "UnoDB"
+              << " | " << std::setw(15) << "RT Mem" << " | " << std::setw(15) << "Rax Mem"
+              << " | " << std::setw(15) << "UnoDB Mem"
+              << " | " << std::setw(15) << "Count" << "\n";
+    std::cout << std::string(155, '-') << "\n";
 
     std::vector<size_t> sizes = {1000, 5000, 10000};
     
@@ -347,7 +316,6 @@ TEST_F(RadixPerformanceTest, InsertionWithPrefixes) {
       radix_memory_.Reset();
       rax_memory_.Reset();
       unodb_memory_.Reset();
-      unodb_str_memory_.Reset();
 
       // RadixTree insertion with memory tracking
       int64_t radix_mem = 0;
@@ -376,44 +344,24 @@ TEST_F(RadixPerformanceTest, InsertionWithPrefixes) {
       });
       rax_mem = rax_memory_.GetUsage();
 
-      // UnoDB insertion (hash-based) with memory tracking
+      // UnoDB insertion (string keys with encoding) with memory tracking
       int64_t unodb_mem = 0;
       std::vector<int*> unodb_values;
       double unodb_time = BenchmarkMs([&]() {
         IsolatedMemoryScope scope(unodb_memory_);
-        unodb_tree_ = std::make_unique<unodb::db<std::uint64_t, unodb::value_view>>();
+        unodb_tree_ = std::make_unique<unodb::db<unodb::key_view, unodb::value_view>>();
+        unodb::key_encoder encoder;
         for (size_t i = 0; i < test_data.size(); ++i) {
           int* value = new int(i);
           unodb_values.push_back(value);
-          std::uint64_t key = std::hash<std::string>{}(test_data[i]);
+          auto key = EncodeString(encoder, test_data[i]);
           unodb_tree_->insert(key, unodb::value_view{reinterpret_cast<const std::byte*>(value), sizeof(int)});
         }
       });
       unodb_mem = unodb_memory_.GetUsage();
 
-      // UnoDB insertion (string keys with encoding) with memory tracking
-      int64_t unodb_str_mem = 0;
-      std::vector<int*> unodb_str_values;
-      double unodb_str_time = BenchmarkMs([&]() {
-        IsolatedMemoryScope scope(unodb_str_memory_);
-        unodb_string_tree_ = std::make_unique<unodb::db<unodb::key_view, unodb::value_view>>();
-        unodb::key_encoder encoder;
-        for (size_t i = 0; i < test_data.size(); ++i) {
-          int* value = new int(i);
-          unodb_str_values.push_back(value);
-          auto key = EncodeString(encoder, test_data[i]);
-          unodb_string_tree_->insert(key, unodb::value_view{reinterpret_cast<const std::byte*>(value), sizeof(int)});
-        }
-      });
-      unodb_str_mem = unodb_str_memory_.GetUsage();
-
-      PrintResults("Prefix " + std::to_string(size), radix_time, rax_time, unodb_time, unodb_str_time,
-                   radix_mem, rax_mem, unodb_mem, unodb_str_mem, size);
-
-    // Cleanup UnoDB string values
-    for (auto* val : unodb_str_values) {
-      delete val;
-    }
+      PrintResults("Prefix " + std::to_string(size), radix_time, rax_time, unodb_time,
+                   radix_mem, rax_mem, unodb_mem, size);
 
     // Cleanup UnoDB values
     for (auto* val : unodb_values) {
@@ -440,9 +388,9 @@ TEST_F(RadixPerformanceTest, LookupPerformance) {
     std::cout << "\n--- " << (mode == DataMode::RANDOM_BYTES ? "Random Bytes (0-255)" : "UTF-8 Text") << " ---\n";
     std::cout << std::left << std::setw(20) << "Operation" << " | "
               << std::setw(15) << "RadixTree" << " | " << std::setw(15) << "Rax"
-              << " | " << std::setw(15) << "UnoDB(hash)" << " | " << std::setw(15) << "UnoDB(str)"
+              << " | " << std::setw(15) << "UnoDB"
               << " | " << std::setw(15) << "Count" << "\n";
-    std::cout << std::string(130, '-') << "\n";
+    std::cout << std::string(100, '-') << "\n";
 
     size_t size = 10000;
     auto test_data = GenerateTestData(size, 5, 20, 42, mode);
@@ -451,8 +399,7 @@ TEST_F(RadixPerformanceTest, LookupPerformance) {
     radix_tree_ = RadixTree<TestTarget>{};
     raxFree(rax_tree_);
     rax_tree_ = raxNew();
-    unodb_tree_ = std::make_unique<unodb::db<std::uint64_t, unodb::value_view>>();
-    unodb_string_tree_ = std::make_unique<unodb::db<unodb::key_view, unodb::value_view>>();
+    unodb_tree_ = std::make_unique<unodb::db<unodb::key_view, unodb::value_view>>();
 
     // Insert into RadixTree
     for (size_t i = 0; i < test_data.size(); ++i) {
@@ -468,25 +415,14 @@ TEST_F(RadixPerformanceTest, LookupPerformance) {
                 test_data[i].length(), value, nullptr);
     }
 
-    // Insert into UnoDB (hash-based)
-    std::vector<int*> unodb_values;
-    std::map<std::string, std::uint64_t> key_mapping;
-    for (size_t i = 0; i < test_data.size(); ++i) {
-      int* value = new int(i);
-      unodb_values.push_back(value);
-      std::uint64_t key = std::hash<std::string>{}(test_data[i]);
-      key_mapping[test_data[i]] = key;
-      unodb_tree_->insert(key, unodb::value_view{reinterpret_cast<const std::byte*>(value), sizeof(int)});
-    }
-
     // Insert into UnoDB (string keys)
-    std::vector<int*> unodb_str_values;
+    std::vector<int*> unodb_values;
     unodb::key_encoder encoder;
     for (size_t i = 0; i < test_data.size(); ++i) {
       int* value = new int(i);
-      unodb_str_values.push_back(value);
+      unodb_values.push_back(value);
       auto key = EncodeString(encoder, test_data[i]);
-      unodb_string_tree_->insert(key, unodb::value_view{reinterpret_cast<const std::byte*>(value), sizeof(int)});
+      unodb_tree_->insert(key, unodb::value_view{reinterpret_cast<const std::byte*>(value), sizeof(int)});
     }
 
     // Shuffle for random access
@@ -519,36 +455,20 @@ TEST_F(RadixPerformanceTest, LookupPerformance) {
       }
     });
 
-    // UnoDB lookup (with hash computation for fair comparison)
+    // UnoDB lookup (with encoding)
     size_t unodb_found = 0;
     double unodb_time = BenchmarkMs([&]() {
+      unodb::key_encoder lookup_enc;
       for (const auto& key : shuffled_data) {
-        std::uint64_t hash_key = std::hash<std::string>{}(key);  // Compute hash each time
-        auto result = unodb_tree_->get(hash_key);
+        auto key_view = EncodeString(lookup_enc, key);
+        auto result = unodb_tree_->get(key_view);
         if (result.has_value()) unodb_found++;
       }
     });
 
-    // UnoDB string lookup (with encoding)
-    size_t unodb_str_found = 0;
-    double unodb_str_time = BenchmarkMs([&]() {
-      unodb::key_encoder lookup_enc;
-      for (const auto& key : shuffled_data) {
-        auto key_view = EncodeString(lookup_enc, key);
-        auto result = unodb_string_tree_->get(key_view);
-        if (result.has_value()) unodb_str_found++;
-      }
-    });
-
-    PrintResultsNoMem("Lookup", radix_time, rax_time, unodb_time, unodb_str_time, size);
-    EXPECT_EQ(radix_found, unodb_str_found);
-    EXPECT_EQ(radix_found, rax_found);
+    PrintResultsNoMem("Lookup", radix_time, rax_time, unodb_time, size);
     EXPECT_EQ(radix_found, unodb_found);
-
-    // Cleanup UnoDB string values
-    for (auto* val : unodb_str_values) {
-      delete val;
-    }
+    EXPECT_EQ(radix_found, rax_found);
 
     // Cleanup UnoDB values
     for (auto* val : unodb_values) {
@@ -571,9 +491,9 @@ TEST_F(RadixPerformanceTest, IterationPerformance) {
   PrintHeader("Full Iteration Performance");
   std::cout << std::left << std::setw(20) << "Operation" << " | "
             << std::setw(15) << "RadixTree" << " | " << std::setw(15) << "Rax"
-            << " | " << std::setw(15) << "UnoDB(hash)" << " | " << std::setw(15) << "UnoDB(str)"
+            << " | " << std::setw(15) << "UnoDB"
             << " | " << std::setw(15) << "Count" << "\n";
-  std::cout << std::string(130, '-') << "\n";
+  std::cout << std::string(100, '-') << "\n";
 
   size_t size = 10000;
   auto test_data = GenerateTestData(size, 5, 20, 42);
@@ -592,12 +512,13 @@ TEST_F(RadixPerformanceTest, IterationPerformance) {
               test_data[i].length(), value, nullptr);
   }
 
-  // Insert into UnoDB
+  // Insert into UnoDB (string keys)
   std::vector<int*> unodb_values;
+  unodb::key_encoder encoder;
   for (size_t i = 0; i < test_data.size(); ++i) {
     int* value = new int(i);
     unodb_values.push_back(value);
-    std::uint64_t key = std::hash<std::string>{}(test_data[i]);
+    auto key = EncodeString(encoder, test_data[i]);
     unodb_tree_->insert(key, unodb::value_view{reinterpret_cast<const std::byte*>(value), sizeof(int)});
   }
 
@@ -632,28 +553,9 @@ TEST_F(RadixPerformanceTest, IterationPerformance) {
     });
   });
 
-  // UnoDB string iteration
-  std::vector<int*> unodb_str_values;
-  unodb::key_encoder encoder;
-  for (size_t i = 0; i < test_data.size(); ++i) {
-    int* value = new int(i);
-    unodb_str_values.push_back(value);
-    auto key = EncodeString(encoder, test_data[i]);
-    unodb_string_tree_->insert(key, unodb::value_view{reinterpret_cast<const std::byte*>(value), sizeof(int)});
-  }
-
-  size_t unodb_str_count = 0;
-  double unodb_str_time = BenchmarkMs([&]() {
-    unodb_string_tree_->scan([&](const auto& visitor) {
-      unodb_str_count++;
-      return false;
-    });
-  });
-
-  PrintResultsNoMem("Iterate", radix_time, rax_time, unodb_time, unodb_str_time, size);
-  EXPECT_EQ(radix_count, unodb_str_count);
-  EXPECT_EQ(radix_count, rax_count);
+  PrintResultsNoMem("Iterate", radix_time, rax_time, unodb_time, size);
   EXPECT_EQ(radix_count, unodb_count);
+  EXPECT_EQ(radix_count, rax_count);
 
   // Cleanup UnoDB values
   for (auto* val : unodb_values) {
@@ -675,9 +577,9 @@ TEST_F(RadixPerformanceTest, PrefixIterationPerformance) {
   PrintHeader("Prefix Iteration Performance");
   std::cout << std::left << std::setw(20) << "Operation" << " | "
             << std::setw(15) << "RadixTree" << " | " << std::setw(15) << "Rax"
-            << " | " << std::setw(15) << "UnoDB(hash)" << " | " << std::setw(15) << "UnoDB(str)"
+            << " | " << std::setw(15) << "UnoDB"
             << " | " << std::setw(15) << "Count" << "\n";
-  std::cout << std::string(130, '-') << "\n";
+  std::cout << std::string(100, '-') << "\n";
 
   size_t size = 10000;
   auto test_data = GenerateTestDataWithPrefixes(size, 42);
@@ -726,15 +628,11 @@ TEST_F(RadixPerformanceTest, PrefixIterationPerformance) {
     raxStop(&iter);
   });
 
-  // UnoDB prefix iteration - not applicable as it uses hashed keys
+  // UnoDB prefix iteration - not applicable (string encoding incompatible with random bytes 0-255)
   double unodb_time = 0.0;
-  
-  // UnoDB(str) prefix iteration - not tested with random bytes (0-255)
-  // Text encoding expects UTF-8, incompatible with full byte range
-  double unodb_str_time = 0.0;
-  std::cout << "(Note: UnoDB uses hash-based keys, UnoDB(str) uses text encoding incompatible with random bytes)\n";
+  std::cout << "(Note: UnoDB string encoding expects UTF-8, incompatible with full byte range)\n";
 
-  PrintResultsNoMem("Prefix '" + prefix + "'", radix_time, rax_time, unodb_time, unodb_str_time, radix_count);
+  PrintResultsNoMem("Prefix '" + prefix + "'", radix_time, rax_time, unodb_time, radix_count);
   EXPECT_EQ(radix_count, rax_count);
 
   // Cleanup Rax values
@@ -752,9 +650,9 @@ TEST_F(RadixPerformanceTest, MixedOperations) {
   PrintHeader("Mixed Operations (50% Insert, 30% Lookup, 20% Delete)");
   std::cout << std::left << std::setw(20) << "Operation" << " | "
             << std::setw(15) << "RadixTree" << " | " << std::setw(15) << "Rax"
-            << " | " << std::setw(15) << "UnoDB(hash)" << " | " << std::setw(15) << "UnoDB(str)"
+            << " | " << std::setw(15) << "UnoDB"
             << " | " << std::setw(15) << "Count" << "\n";
-  std::cout << std::string(130, '-') << "\n";
+  std::cout << std::string(100, '-') << "\n";
 
   size_t operation_count = 10000;
   auto test_data = GenerateTestData(operation_count, 5, 20, 42);
@@ -816,67 +714,35 @@ TEST_F(RadixPerformanceTest, MixedOperations) {
     }
   });
 
-  // UnoDB mixed operations
-  unodb_tree_ = std::make_unique<unodb::db<std::uint64_t, unodb::value_view>>();
-  gen.seed(42);  // Reset for same sequence
+  // UnoDB string mixed operations
+  unodb_tree_ = std::make_unique<unodb::db<unodb::key_view, unodb::value_view>>();
+  gen.seed(42);
   std::vector<std::string> inserted_unodb;
   std::vector<int*> unodb_mixed_values;
-  std::map<std::string, std::uint64_t> unodb_key_map;
   double unodb_time = BenchmarkMs([&]() {
-    for (size_t i = 0; i < operation_count; ++i) {
-      int op = op_dist(gen);
-      if (op < 50) {  // Insert
-        int* value = new int(i);
-        unodb_mixed_values.push_back(value);
-        std::uint64_t key = std::hash<std::string>{}(test_data[i]);
-        unodb_key_map[test_data[i]] = key;
-        unodb_tree_->insert(key, unodb::value_view{reinterpret_cast<const std::byte*>(value), sizeof(int)});
-        inserted_unodb.push_back(test_data[i]);
-      } else if (op < 80 && !inserted_unodb.empty()) {  // Lookup
-        size_t idx = gen() % inserted_unodb.size();
-        unodb_tree_->get(unodb_key_map[inserted_unodb[idx]]);
-      } else if (!inserted_unodb.empty()) {  // Delete
-        size_t idx = gen() % inserted_unodb.size();
-        unodb_tree_->remove(unodb_key_map[inserted_unodb[idx]]);
-        inserted_unodb.erase(inserted_unodb.begin() + idx);
-      }
-    }
-  });
-
-  // UnoDB string mixed operations
-  unodb_string_tree_ = std::make_unique<unodb::db<unodb::key_view, unodb::value_view>>();
-  gen.seed(42);
-  std::vector<std::string> inserted_unodb_str;
-  std::vector<int*> unodb_str_mixed_values;
-  double unodb_str_time = BenchmarkMs([&]() {
     unodb::key_encoder encoder;
     for (size_t i = 0; i < operation_count; ++i) {
       int op = op_dist(gen);
       if (op < 50) {  // Insert
         int* value = new int(i);
-        unodb_str_mixed_values.push_back(value);
+        unodb_mixed_values.push_back(value);
         auto key = EncodeString(encoder, test_data[i]);
-        unodb_string_tree_->insert(key, unodb::value_view{reinterpret_cast<const std::byte*>(value), sizeof(int)});
-        inserted_unodb_str.push_back(test_data[i]);
-      } else if (op < 80 && !inserted_unodb_str.empty()) {  // Lookup
-        size_t idx = gen() % inserted_unodb_str.size();
-        auto key = EncodeString(encoder, inserted_unodb_str[idx]);
-        unodb_string_tree_->get(key);
-      } else if (!inserted_unodb_str.empty()) {  // Delete
-        size_t idx = gen() % inserted_unodb_str.size();
-        auto key = EncodeString(encoder, inserted_unodb_str[idx]);
-        unodb_string_tree_->remove(key);
-        inserted_unodb_str.erase(inserted_unodb_str.begin() + idx);
+        unodb_tree_->insert(key, unodb::value_view{reinterpret_cast<const std::byte*>(value), sizeof(int)});
+        inserted_unodb.push_back(test_data[i]);
+      } else if (op < 80 && !inserted_unodb.empty()) {  // Lookup
+        size_t idx = gen() % inserted_unodb.size();
+        auto key = EncodeString(encoder, inserted_unodb[idx]);
+        unodb_tree_->get(key);
+      } else if (!inserted_unodb.empty()) {  // Delete
+        size_t idx = gen() % inserted_unodb.size();
+        auto key = EncodeString(encoder, inserted_unodb[idx]);
+        unodb_tree_->remove(key);
+        inserted_unodb.erase(inserted_unodb.begin() + idx);
       }
     }
   });
 
-  PrintResultsNoMem("Mixed ops", radix_time, rax_time, unodb_time, unodb_str_time, operation_count);
-
-  // Cleanup UnoDB string values
-  for (auto* val : unodb_str_mixed_values) {
-    delete val;
-  }
+  PrintResultsNoMem("Mixed ops", radix_time, rax_time, unodb_time, operation_count);
 
   // Cleanup UnoDB values
   for (auto* val : unodb_mixed_values) {
@@ -974,21 +840,12 @@ TEST_F(RadixPerformanceTest, CorrectnessValidation) {
               key.length(), val, nullptr);
   }
   
-  // Insert into UnoDB (hash)
-  std::map<std::string, std::uint64_t> key_mapping;
-  for (const auto& [key, value] : test_data) {
-    int* val = new int(value);
-    std::uint64_t hash_key = std::hash<std::string>{}(key);
-    key_mapping[key] = hash_key;
-    unodb_tree_->insert(hash_key, unodb::value_view{reinterpret_cast<const std::byte*>(val), sizeof(int)});
-  }
-  
-  // Insert into UnoDB (string)
+  // Insert into UnoDB (string encoding)
   unodb::key_encoder encoder;
   for (const auto& [key, value] : test_data) {
     int* val = new int(value);
     auto encoded_key = EncodeString(encoder, key);
-    unodb_string_tree_->insert(encoded_key, unodb::value_view{reinterpret_cast<const std::byte*>(val), sizeof(int)});
+    unodb_tree_->insert(encoded_key, unodb::value_view{reinterpret_cast<const std::byte*>(val), sizeof(int)});
   }
   
   std::cout << "✓ All implementations populated with test data\n\n";
@@ -1015,20 +872,13 @@ TEST_F(RadixPerformanceTest, CorrectnessValidation) {
     EXPECT_EQ(rax_value, expected_value)
         << "Rax returned wrong value for key '" << key << "'";
     
-    // UnoDB (hash) lookup
-    auto unodb_result = unodb_tree_->get(key_mapping[key]);
-    ASSERT_TRUE(unodb_result.has_value()) << "UnoDB(hash) failed to find key '" << key << "'";
-    int unodb_value = *reinterpret_cast<const int*>(unodb_result->data());
-    EXPECT_EQ(unodb_value, expected_value)
-        << "UnoDB(hash) returned wrong value for key '" << key << "'";
-    
     // UnoDB (string) lookup
     unodb::key_encoder lookup_enc;
     auto encoded_key = EncodeString(lookup_enc, key);
-    auto unodb_str_result = unodb_string_tree_->get(encoded_key);
-    ASSERT_TRUE(unodb_str_result.has_value()) << "UnoDB(str) failed to find key '" << key << "'";
-    int unodb_str_value = *reinterpret_cast<const int*>(unodb_str_result->data());
-    EXPECT_EQ(unodb_str_value, expected_value)
+    auto unodb_result = unodb_tree_->get(encoded_key);
+    ASSERT_TRUE(unodb_result.has_value()) << "UnoDB(str) failed to find key '" << key << "'";
+    int unodb_value = *reinterpret_cast<const int*>(unodb_result->data());
+    EXPECT_EQ(unodb_value, expected_value)
         << "UnoDB(str) returned wrong value for key '" << key << "'";
   }
   
@@ -1054,7 +904,7 @@ TEST_F(RadixPerformanceTest, CorrectnessValidation) {
     unodb::key_encoder enc;
     int* unodb_val = new int(value);
     auto encoded = EncodeString(enc, key);
-    unodb_string_tree_->insert(encoded, unodb::value_view{reinterpret_cast<const std::byte*>(unodb_val), sizeof(int)});
+    unodb_tree_->insert(encoded, unodb::value_view{reinterpret_cast<const std::byte*>(unodb_val), sizeof(int)});
   }
   
   // Test RadixTree prefix iteration
@@ -1083,7 +933,7 @@ TEST_F(RadixPerformanceTest, CorrectnessValidation) {
   std::set<std::string> unodb_str_keys;
   unodb::key_encoder prefix_enc;
   auto prefix_key = EncodeString(prefix_enc, "user:");
-  unodb_string_tree_->scan_from(prefix_key, [&](const auto& visitor) {
+  unodb_tree_->scan_from(prefix_key, [&](const auto& visitor) {
     // Note: UnoDB string iteration may return more keys than just the prefix
     // This is a limitation of the current implementation
     unodb_str_keys.insert("user:found");  // Simplified for now
@@ -1121,15 +971,11 @@ TEST_F(RadixPerformanceTest, CorrectnessValidation) {
                                missing_key.length());
   EXPECT_EQ(rax_missing, raxNotFound) << "Rax incorrectly found non-existent key";
   
-  // UnoDB (hash) should not find it
-  auto unodb_missing = unodb_tree_->get(std::hash<std::string>{}(missing_key));
-  EXPECT_FALSE(unodb_missing.has_value()) << "UnoDB(hash) incorrectly found non-existent key";
-  
   // UnoDB (string) should not find it
   unodb::key_encoder miss_enc;
   auto missing_encoded = EncodeString(miss_enc, missing_key);
-  auto unodb_str_missing = unodb_string_tree_->get(missing_encoded);
-  EXPECT_FALSE(unodb_str_missing.has_value()) << "UnoDB(str) incorrectly found non-existent key";
+  auto unodb_missing = unodb_tree_->get(missing_encoded);
+  EXPECT_FALSE(unodb_missing.has_value()) << "UnoDB(str) incorrectly found non-existent key";
   
   std::cout << "✓ All implementations correctly handle non-existent keys\n\n";
   
@@ -1164,9 +1010,9 @@ TEST_F(RadixPerformanceTest, LargeScaleStressTest) {
   // Table header
   std::cout << std::left << std::setw(20) << "Operation" << " | "
             << std::setw(10) << "RadixTree" << " | " << std::setw(10) << "Rax"
-            << " | " << std::setw(10) << "UnoDB(hash)" << " | " << std::setw(10) << "UnoDB(str)"
+            << " | " << std::setw(10) << "UnoDB"
             << " | " << std::setw(10) << "Keys/sec" << "\n";
-  std::cout << std::string(90, '-') << "\n";
+  std::cout << std::string(75, '-') << "\n";
   
   // === INSERTION ===
   std::cout << "\n=== Phase 1: Bulk Insertion ===\n";
@@ -1193,30 +1039,16 @@ TEST_F(RadixPerformanceTest, LargeScaleStressTest) {
     }
   });
   
-  // UnoDB (hash) insertion
-  unodb_tree_ = std::make_unique<unodb::db<std::uint64_t, unodb::value_view>>();
-  std::vector<int*> unodb_values;
-  std::map<std::string, std::uint64_t> key_mapping;
-  double unodb_insert_time = BenchmarkMs([&]() {
-    for (size_t i = 0; i < test_data.size(); ++i) {
-      int* value = new int(i);
-      unodb_values.push_back(value);
-      std::uint64_t key = std::hash<std::string>{}(test_data[i]);
-      key_mapping[test_data[i]] = key;
-      unodb_tree_->insert(key, unodb::value_view{reinterpret_cast<const std::byte*>(value), sizeof(int)});
-    }
-  });
-  
   // UnoDB (string) insertion
-  unodb_string_tree_ = std::make_unique<unodb::db<unodb::key_view, unodb::value_view>>();
-  std::vector<int*> unodb_str_values;
-  double unodb_str_insert_time = BenchmarkMs([&]() {
+  unodb_tree_ = std::make_unique<unodb::db<unodb::key_view, unodb::value_view>>();
+  std::vector<int*> unodb_values;
+  double unodb_insert_time = BenchmarkMs([&]() {
     unodb::key_encoder encoder;
     for (size_t i = 0; i < test_data.size(); ++i) {
       int* value = new int(i);
-      unodb_str_values.push_back(value);
+      unodb_values.push_back(value);
       auto key = EncodeString(encoder, test_data[i]);
-      unodb_string_tree_->insert(key, unodb::value_view{reinterpret_cast<const std::byte*>(value), sizeof(int)});
+      unodb_tree_->insert(key, unodb::value_view{reinterpret_cast<const std::byte*>(value), sizeof(int)});
     }
   });
   
@@ -1226,14 +1058,12 @@ TEST_F(RadixPerformanceTest, LargeScaleStressTest) {
   oss.str(""); oss << radix_insert_time << " ms"; std::string radix_ins_str = oss.str();
   oss.str(""); oss << rax_insert_time << " ms"; std::string rax_ins_str = oss.str();
   oss.str(""); oss << unodb_insert_time << " ms"; std::string unodb_ins_str = oss.str();
-  oss.str(""); oss << unodb_str_insert_time << " ms"; std::string unodb_s_ins_str = oss.str();
-  oss.str(""); oss << std::setprecision(0) << (key_count * 1000.0 / unodb_str_insert_time) << " K/s"; std::string kps_str = oss.str();
+  oss.str(""); oss << std::setprecision(0) << (key_count * 1000.0 / unodb_insert_time) << " K/s"; std::string kps_str = oss.str();
   
   std::cout << std::left << std::setw(20) << "Insert " + std::to_string(key_count/1000) + "K"
             << " | " << std::right << std::setw(10) << radix_ins_str
             << " | " << std::setw(10) << rax_ins_str
             << " | " << std::setw(10) << unodb_ins_str
-            << " | " << std::setw(10) << unodb_s_ins_str
             << " | " << std::setw(10) << kps_str << "\n";
   
   // === LOOKUP ===
@@ -1271,44 +1101,31 @@ TEST_F(RadixPerformanceTest, LargeScaleStressTest) {
     }
   });
   
-  // UnoDB (hash) lookup (with hash computation for fair comparison)
+  // UnoDB (string) lookup
   size_t unodb_found = 0;
   double unodb_lookup_time = BenchmarkMs([&]() {
-    for (const auto& key : lookup_sample) {
-      std::uint64_t hash_key = std::hash<std::string>{}(key);  // Compute hash each time
-      auto result = unodb_tree_->get(hash_key);
-      if (result.has_value()) unodb_found++;
-    }
-  });
-  
-  // UnoDB (string) lookup
-  size_t unodb_str_found = 0;
-  double unodb_str_lookup_time = BenchmarkMs([&]() {
     unodb::key_encoder encoder;
     for (const auto& key : lookup_sample) {
       auto key_view = EncodeString(encoder, key);
-      auto result = unodb_string_tree_->get(key_view);
-      if (result.has_value()) unodb_str_found++;
+      auto result = unodb_tree_->get(key_view);
+      if (result.has_value()) unodb_found++;
     }
   });
   
   oss.str(""); oss << std::setprecision(2) << radix_lookup_time << " ms"; std::string radix_lkp_str = oss.str();
   oss.str(""); oss << rax_lookup_time << " ms"; std::string rax_lkp_str = oss.str();
   oss.str(""); oss << unodb_lookup_time << " ms"; std::string unodb_lkp_str = oss.str();
-  oss.str(""); oss << unodb_str_lookup_time << " ms"; std::string unodb_s_lkp_str = oss.str();
-  oss.str(""); oss << std::setprecision(0) << (lookup_count * 1000.0 / unodb_str_lookup_time) << " K/s"; std::string lkp_kps_str = oss.str();
+  oss.str(""); oss << std::setprecision(0) << (lookup_count * 1000.0 / unodb_lookup_time) << " K/s"; std::string lkp_kps_str = oss.str();
   
   std::cout << std::left << std::setw(20) << "Lookup " + std::to_string(lookup_count/1000) + "K"
             << " | " << std::right << std::setw(10) << radix_lkp_str
             << " | " << std::setw(10) << rax_lkp_str
             << " | " << std::setw(10) << unodb_lkp_str
-            << " | " << std::setw(10) << unodb_s_lkp_str
             << " | " << std::setw(10) << lkp_kps_str << "\n";
   
   EXPECT_EQ(radix_found, lookup_count);
   EXPECT_EQ(rax_found, lookup_count);
   EXPECT_EQ(unodb_found, lookup_count);
-  EXPECT_EQ(unodb_str_found, lookup_count);
   
   // === ITERATION ===
   std::cout << "\n=== Phase 3: Full Iteration ===\n";
@@ -1335,7 +1152,7 @@ TEST_F(RadixPerformanceTest, LargeScaleStressTest) {
     raxStop(&iter);
   });
   
-  // UnoDB (hash) iteration
+  // UnoDB iteration
   size_t unodb_count = 0;
   double unodb_iter_time = BenchmarkMs([&]() {
     unodb_tree_->scan([&](const auto& visitor) {
@@ -1344,44 +1161,31 @@ TEST_F(RadixPerformanceTest, LargeScaleStressTest) {
     });
   });
   
-  // UnoDB (string) iteration
-  size_t unodb_str_count = 0;
-  double unodb_str_iter_time = BenchmarkMs([&]() {
-    unodb_string_tree_->scan([&](const auto& visitor) {
-      unodb_str_count++;
-      return false;
-    });
-  });
-  
   oss.str(""); oss << std::setprecision(2) << radix_iter_time << " ms"; std::string radix_itr_str = oss.str();
   oss.str(""); oss << rax_iter_time << " ms"; std::string rax_itr_str = oss.str();
   oss.str(""); oss << unodb_iter_time << " ms"; std::string unodb_itr_str = oss.str();
-  oss.str(""); oss << unodb_str_iter_time << " ms"; std::string unodb_s_itr_str = oss.str();
-  oss.str(""); oss << std::setprecision(0) << (key_count * 1000.0 / unodb_str_iter_time) << " K/s"; std::string itr_kps_str = oss.str();
+  oss.str(""); oss << std::setprecision(0) << (key_count * 1000.0 / unodb_iter_time) << " K/s"; std::string itr_kps_str = oss.str();
   
   std::cout << std::left << std::setw(20) << "Iterate " + std::to_string(key_count/1000) + "K"
             << " | " << std::right << std::setw(10) << radix_itr_str
             << " | " << std::setw(10) << rax_itr_str
             << " | " << std::setw(10) << unodb_itr_str
-            << " | " << std::setw(10) << unodb_s_itr_str
             << " | " << std::setw(10) << itr_kps_str << "\n";
   
   EXPECT_EQ(radix_count, key_count);
   EXPECT_EQ(rax_count, key_count);
   EXPECT_EQ(unodb_count, key_count);
-  EXPECT_EQ(unodb_str_count, key_count);
   
   // === SUMMARY ===
   std::cout << "\n" << std::string(90, '=') << "\n";
   std::cout << "Summary - UnoDB(str) Throughput:\n";
   std::cout << "  Insertion: " << std::fixed << std::setprecision(0)
-            << (key_count * 1000.0 / unodb_str_insert_time) << " keys/sec\n";
-  std::cout << "  Lookup:    " << (lookup_count * 1000.0 / unodb_str_lookup_time) << " keys/sec\n";
-  std::cout << "  Iteration: " << (key_count * 1000.0 / unodb_str_iter_time) << " keys/sec\n";
+            << (key_count * 1000.0 / unodb_insert_time) << " keys/sec\n";
+  std::cout << "  Lookup:    " << (lookup_count * 1000.0 / unodb_lookup_time) << " keys/sec\n";
+  std::cout << "  Iteration: " << (key_count * 1000.0 / unodb_iter_time) << " keys/sec\n";
   std::cout << std::string(90, '=') << "\n";
   
   // Cleanup
-  for (auto* val : unodb_str_values) delete val;
   for (auto* val : unodb_values) delete val;
   for (auto* val : rax_values) delete val;
 }
