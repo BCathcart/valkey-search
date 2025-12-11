@@ -63,6 +63,7 @@ class Text : public IndexBase {
       const override {
     absl::MutexLock lock(&index_mutex_);
     // TODO: Implement proper key tracking
+    return absl::OkStatus();
   }
 
   size_t GetUnTrackedKeyCount() const override {
@@ -80,6 +81,7 @@ class Text : public IndexBase {
       const override {
     absl::MutexLock lock(&index_mutex_);
     // TODO
+    return absl::OkStatus();
   }
 
   size_t GetTrackedKeyCount() const override;

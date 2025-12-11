@@ -35,6 +35,15 @@ namespace valkey_search::indexes::text {
 template <typename T>
 class InvasivePtr {
  public:
+  struct RefCountWrapper {
+    template <typename... Args>
+    explicit RefCountWrapper(Args&&... args)
+        : data_(std::forward<Args>(args)...) {}
+
+    std::atomic<uint32_t> refcount_ = 1;
+    T data_;
+  };
+
   InvasivePtr() = default;
 
   InvasivePtr(std::nullptr_t) noexcept : ptr_(nullptr) {}
@@ -47,16 +56,36 @@ class InvasivePtr {
     return result;
   }
 
-  ~InvasivePtr() { Release(); }
+  // Adopts a raw RefCountWrapper pointer without modifying its reference count.
+  // Every Release() should be paired with a corresponding AdoptRaw() later to
+  // restore safe memory management.
+  static InvasivePtr AdoptRaw(RefCountWrapper* wrapper) {
+    return InvasivePtr(wrapper);
+  }
+
+  // Creates a new shared reference from a raw pointer, incrementing the
+  // reference count. Use this when copying from void* storage (like Rax tree
+  // targets) where you need a new managed reference.
+  static InvasivePtr CopyRaw(RefCountWrapper* wrapper) {
+    if (!wrapper) {
+      return InvasivePtr{};
+    }
+    InvasivePtr result;
+    result.ptr_ = wrapper;
+    result.AddRef();
+    return result;
+  }
+
+  ~InvasivePtr() { ReleaseRef(); }
 
   // Copy semantics
-  InvasivePtr(const InvasivePtr& other) : ptr_(other.ptr_) { Acquire(); }
+  InvasivePtr(const InvasivePtr& other) : ptr_(other.ptr_) { AddRef(); }
 
   InvasivePtr& operator=(const InvasivePtr& other) {
     if (this != &other) {
-      Release();
+      ReleaseRef();
       ptr_ = other.ptr_;
-      Acquire();
+      AddRef();
     }
     return *this;
   }
@@ -73,7 +102,7 @@ class InvasivePtr {
 
   InvasivePtr& operator=(InvasivePtr&& other) noexcept {
     if (this != &other) {
-      Release();
+      ReleaseRef();
       ptr_ = other.ptr_;
       other.ptr_ = nullptr;
     }
@@ -92,27 +121,30 @@ class InvasivePtr {
 
   // Resets to the default nullptr state
   void Clear() {
-    Release();
+    ReleaseRef();
     ptr_ = nullptr;
   }
 
+  // Transfers ownership to caller without decrementing refcount.
+  // Caller must reconstruct via AdoptRaw() to restore memory management.
+  // Freeing the memory directly is very dangerous - you must be certain there
+  // are no other references.
+  RefCountWrapper* ReleaseRaw() && {
+    RefCountWrapper* result = ptr_;
+    ptr_ = nullptr;
+    return result;
+  }
+
  private:
-  struct RefCountWrapper {
-    template <typename... Args>
-    explicit RefCountWrapper(Args&&... args)
-        : data_(std::forward<Args>(args)...) {}
+  explicit InvasivePtr(RefCountWrapper* wrapper) : ptr_(wrapper) {}
 
-    std::atomic<uint32_t> refcount_ = 1;
-    T data_;
-  };
-
-  void Release() {
+  void ReleaseRef() {
     if (ptr_ && ptr_->refcount_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
       delete ptr_;
     }
   }
 
-  void Acquire() {
+  void AddRef() {
     if (ptr_) {
       ptr_->refcount_.fetch_add(1, std::memory_order_relaxed);
     }

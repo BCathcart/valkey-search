@@ -88,27 +88,20 @@ InvasivePtr<Postings> RemoveKeyFromPostings(
 /*** TextIndex ***/
 
 TextIndex::TextIndex(bool suffix)
-    : suffix_tree_(suffix ? std::make_unique<RadixTree<InvasivePtr<Postings>>>()
-                          : nullptr) {}
+    : suffix_tree_(suffix ? std::make_unique<Rax>() : nullptr) {}
 
-RadixTree<InvasivePtr<Postings>>& TextIndex::GetPrefix() {
-  return prefix_tree_;
-}
+Rax& TextIndex::GetPrefix() { return prefix_tree_; }
 
-const RadixTree<InvasivePtr<Postings>>& TextIndex::GetPrefix() const {
-  return prefix_tree_;
-}
+const Rax& TextIndex::GetPrefix() const { return prefix_tree_; }
 
-std::optional<std::reference_wrapper<RadixTree<InvasivePtr<Postings>>>>
-TextIndex::GetSuffix() {
+std::optional<std::reference_wrapper<Rax>> TextIndex::GetSuffix() {
   if (!suffix_tree_) {
     return std::nullopt;
   }
   return std::ref(*suffix_tree_);
 }
 
-std::optional<std::reference_wrapper<const RadixTree<InvasivePtr<Postings>>>>
-TextIndex::GetSuffix() const {
+std::optional<std::reference_wrapper<const Rax>> TextIndex::GetSuffix() const {
   if (!suffix_tree_) {
     return std::nullopt;
   }
@@ -191,30 +184,64 @@ void TextIndexSchema::CommitKeyData(const InternedStringPtr& key) {
 
     // Update the postings object for the token in the schema-level index with
     // the key and position map
+
+    auto target_add_fn = [&](void* old_val) {
+      NestedMemoryScope scope{metadata_.posting_memory_pool_};
+      // Note: Right now this won't include the position map memory since
+      // it's already allocated and moved into the postings object. Once
+      // we start creating a serialized version instead then it will be
+      // tracked. At that point stop moving the pos_map and just pass a
+      // reference so that it doesn't get cleaned up in the memory scope.
+
+      // Take ownership of the existing postings object reference if there is
+      // one. It will be deconstructed at the end of this scope.
+      auto existing_postings =
+          old_val ? InvasivePtr<Postings>::AdoptRaw(
+                        static_cast<InvasivePtr<Postings>::RefCountWrapper*>(
+                            old_val))
+                  : InvasivePtr<Postings>{};
+
+      // Mutate the postings
+      InvasivePtr<Postings> new_postings =
+          AddKeyToPostings(existing_postings, key, std::move(pos_map));
+
+      // Copy the new postings to the outer scope
+      updated_target = new_postings;
+
+      // Pass ownership of the new postings object reference to the tree
+      return static_cast<void*>(std::move(new_postings).ReleaseRaw());
+    };
+
+    auto target_set_fn = [&](void* old_val) {
+      // Take ownership of the existing postings object reference if there is
+      // one. It will be deconstructed at the end of this scope.
+      auto existing_postings =
+          old_val ? InvasivePtr<Postings>::AdoptRaw(
+                        static_cast<InvasivePtr<Postings>::RefCountWrapper*>(
+                            old_val))
+                  : InvasivePtr<Postings>{};
+
+      // Grab a new reference to the shared posings object and pass ownership of
+      // it to the tree.
+      InvasivePtr<Postings> copy = updated_target;
+      return static_cast<void*>(std::move(copy).ReleaseRaw());
+    };
+
     {
       std::lock_guard<std::mutex> schema_guard(text_index_mutex_);
-      updated_target =
-          text_index_->GetPrefix().MutateTarget(token, [&](auto existing) {
-            NestedMemoryScope scope{metadata_.posting_memory_pool_};
-            // Note: Right now this won't include the position map memory since
-            // it's already allocated and moved into the postings object. Once
-            // we start creating a serialized version instead then it will be
-            // tracked. At that point stop moving the pos_map and just pass a
-            // reference so that it doesn't get cleaned up in the memory scope.
-            return AddKeyToPostings(existing, key, std::move(pos_map));
-          });
+      text_index_->GetPrefix().MutateTarget(token, target_add_fn);
       if (suffix) {
-        text_index_->GetSuffix().value().get().SetTarget(*reverse_token,
-                                                         updated_target);
+        text_index_->GetSuffix().value().get().MutateTarget(*reverse_token,
+                                                            target_set_fn);
       }
     }
 
     // Put the token in the per-key index pointing to the same shared postings
     // object
-    key_index.GetPrefix().SetTarget(token, updated_target);
+    key_index.GetPrefix().MutateTarget(token, target_set_fn);
     if (suffix) {
-      key_index.GetSuffix().value().get().SetTarget(*reverse_token,
-                                                    updated_target);
+      key_index.GetSuffix().value().get().MutateTarget(*reverse_token,
+                                                       target_set_fn);
     }
   }
 
@@ -238,24 +265,65 @@ void TextIndexSchema::DeleteKeyData(const InternedStringPtr& key) {
       return;
     }
   }
-
   TextIndex& key_index = node.mapped();
 
-  auto iter = key_index.GetPrefix().GetWordIterator("");
+  InvasivePtr<Postings> updated_target;
+
+  auto target_remove_fn = [&](void* old_val) {
+    NestedMemoryScope scope{metadata_.posting_memory_pool_};
+
+    // Take ownership of the existing postings object reference if there is one.
+    // It will be deconstructed at the end of this scope.
+    auto existing_postings =
+        old_val
+            ? InvasivePtr<Postings>::AdoptRaw(
+                  static_cast<InvasivePtr<Postings>::RefCountWrapper*>(old_val))
+            : InvasivePtr<Postings>{};
+
+    // Mutate the postings
+    InvasivePtr<Postings> new_postings =
+        RemoveKeyFromPostings(existing_postings, key);
+
+    // Copy the new postings to the outer scope
+    updated_target = new_postings;
+
+    // Pass ownership of the new postings object reference to the tree
+    return static_cast<void*>(std::move(new_postings).ReleaseRaw());
+  };
+
+  auto target_set_fn = [&](void* old_val) {
+    // Take ownership of the existing postings object reference if there is
+    // one. It will be deconstructed at the end of this scope.
+    auto existing_postings =
+        old_val
+            ? InvasivePtr<Postings>::AdoptRaw(
+                  static_cast<InvasivePtr<Postings>::RefCountWrapper*>(old_val))
+            : InvasivePtr<Postings>{};
+
+    // Grab a new reference to the shared posings object and pass ownership of
+    // it to the tree.
+    InvasivePtr<Postings> copy = updated_target;
+    return static_cast<void*>(std::move(copy).ReleaseRaw());
+  };
 
   // Cleanup schema-level text index
+  auto suffix_opt = text_index_->GetSuffix();
+  auto iter = key_index.GetPrefix().GetWordIterator("");
   std::lock_guard<std::mutex> schema_guard(text_index_mutex_);
   while (!iter.Done()) {
+    // Clean up the reference held by the per-key tree(s)
+    void* target = iter.GetTarget();
+    for (int i = 0; i < (suffix_opt.has_value() ? 2 : 1); i++) {
+      InvasivePtr<Postings>::AdoptRaw(
+          static_cast<InvasivePtr<Postings>::RefCountWrapper*>(target));
+    }
+
+    // Remove the key from the schema-level trees
     std::string_view word = iter.GetWord();
-    InvasivePtr<Postings> new_target =
-        text_index_->GetPrefix().MutateTarget(word, [&](auto existing) {
-          NestedMemoryScope scope{metadata_.posting_memory_pool_};
-          return RemoveKeyFromPostings(existing, key);
-        });
-    auto suffix_opt = text_index_->GetSuffix();
+    text_index_->GetPrefix().MutateTarget(word, target_remove_fn);
     if (suffix_opt.has_value()) {
       std::string reverse_word(word.rbegin(), word.rend());
-      suffix_opt.value().get().SetTarget(reverse_word, new_target);
+      suffix_opt.value().get().MutateTarget(reverse_word, target_set_fn);
     }
     iter.Next();
   }

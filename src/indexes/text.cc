@@ -139,7 +139,7 @@ std::unique_ptr<indexes::text::TextIterator> TermPredicate::BuildTextIterator(
   std::vector<indexes::text::Postings::KeyIterator> key_iterators;
   while (!word_iter.Done()) {
     if (word_iter.GetWord() == GetTextString()) {
-      key_iterators.emplace_back(word_iter.GetTarget()->GetKeyIterator());
+      key_iterators.emplace_back(word_iter.GetPostingsTarget()->GetKeyIterator());
     }
     word_iter.Next();
   }
@@ -158,7 +158,7 @@ std::unique_ptr<indexes::text::TextIterator> PrefixPredicate::BuildTextIterator(
       fetcher->text_index_->GetPrefix().GetWordIterator(GetTextString());
   std::vector<indexes::text::Postings::KeyIterator> key_iterators;
   while (!word_iter.Done()) {
-    key_iterators.emplace_back(word_iter.GetTarget()->GetKeyIterator());
+    key_iterators.emplace_back(word_iter.GetPostingsTarget()->GetKeyIterator());
     word_iter.Next();
   }
   // We do not perform positional checks on the initial background search.
@@ -180,7 +180,7 @@ std::unique_ptr<indexes::text::TextIterator> SuffixPredicate::BuildTextIterator(
           reversed_word);
   std::vector<indexes::text::Postings::KeyIterator> key_iterators;
   while (!word_iter.Done()) {
-    key_iterators.emplace_back(word_iter.GetTarget()->GetKeyIterator());
+    key_iterators.emplace_back(word_iter.GetPostingsTarget()->GetKeyIterator());
     word_iter.Next();
   }
   // We do not perform positional checks on the initial background search.
