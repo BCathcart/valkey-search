@@ -945,6 +945,10 @@ int raxMutate(rax *rax, unsigned char *s, size_t len, raxMutateCallback callback
         /* Key doesn't exist and callback returned NULL - nothing to do */
         return 1;
     } else {
+        /* If the callback returned the same pointer, no update needed */
+        if (new_value == current_value) {
+            return 1;
+        }
         /* Insert or update the key.
          * NOTE: We don't need to pass old pointer because the callback already
          * handled ownership of current_value. When updating, raxInsert will
