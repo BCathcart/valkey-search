@@ -83,8 +83,17 @@ class Rax {
 public:
   class WordIterator;
   class PathIterator;
+
+  Rax();
+  ~Rax();
   
-  Rax() = default;
+  // Move constructor and assignment
+  Rax(Rax&& other) noexcept;
+  Rax& operator=(Rax&& other) noexcept;
+  
+  // Delete copy constructor and assignment (Rax owns its internal state)
+  Rax(const Rax&) = delete;
+  Rax& operator=(const Rax&) = delete;
 
   //
   // Adds the target for the given word, replacing the existing target
@@ -123,8 +132,8 @@ public:
   // (which is normal) then no locking is required within the mutate function
   // itself.
   //
-  void* MutateTarget(absl::string_view word,
-                     absl::FunctionRef<void*(void*)> mutate);
+  void MutateTarget(absl::string_view word,
+                    absl::FunctionRef<void*(void*)> mutate);
 
   // TODO: Replace with GetWordCount("") once it's implemented
   // Get the total number of words in the RadixTree.

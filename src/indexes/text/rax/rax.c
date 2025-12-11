@@ -929,13 +929,13 @@ int raxFind(rax *rax, unsigned char *s, size_t len, void **value) {
  * on out of memory). */
 int raxMutate(rax *rax, unsigned char *s, size_t len, raxMutateCallback callback, void *caller_context) {
     void *current_value = NULL;
-    
+
     /* Find the current value */
     int found = raxFind(rax, s, len, &current_value);
-    
+
     /* Call the callback to get the new value */
     void *new_value = callback(current_value, caller_context);
-    
+
     /* Handle the result */
     if (new_value == NULL) {
         /* Delete the key if it exists */
@@ -945,8 +945,18 @@ int raxMutate(rax *rax, unsigned char *s, size_t len, raxMutateCallback callback
         /* Key doesn't exist and callback returned NULL - nothing to do */
         return 1;
     } else {
-        /* Insert or update the key */
-        return raxInsert(rax, s, len, new_value, NULL);
+        /* Insert or update the key.
+         * NOTE: We don't need to pass old pointer because the callback already
+         * handled ownership of current_value. When updating, raxInsert will
+         * overwrite the stored pointer with new_value. */
+        errno = 0;  /* Clear errno before the operation */
+        int res = raxInsert(rax, s, len, new_value, NULL);
+        if (res == 0 && errno != 0) {
+            /* Actual failure (OOM) */
+            return 0;
+        }
+        /* Success: either new insert (res=1) or update (res=0, errno=0) */
+        return 1;
     }
 }
 

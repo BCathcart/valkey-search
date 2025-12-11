@@ -7,9 +7,42 @@
 
 #include "src/indexes/text/rax_wrapper.h"
 
+#include <cerrno>
+#include <cstring>
+
 #include "src/indexes/text/posting.h"
 
 namespace valkey_search::indexes::text {
+
+// Constructor
+Rax::Rax() : rax_(raxNew()) {
+  CHECK(rax_ != nullptr) << "Failed to create rax tree";
+}
+
+// Destructor
+Rax::~Rax() {
+  if (rax_) {
+    raxFree(rax_);
+    rax_ = nullptr;
+  }
+}
+
+// Move constructor
+Rax::Rax(Rax&& other) noexcept : rax_(other.rax_) {
+  other.rax_ = nullptr;
+}
+
+// Move assignment
+Rax& Rax::operator=(Rax&& other) noexcept {
+  if (this != &other) {
+    if (rax_) {
+      raxFree(rax_);
+    }
+    rax_ = other.rax_;
+    other.rax_ = nullptr;
+  }
+  return *this;
+}
 
 namespace {
 
@@ -18,7 +51,7 @@ namespace {
 // in a C-style function and pass the closure as opaque caller data.
 extern "C" void* MutateCallbackWrapper(void* current, void* caller_context) {
   auto* fn = static_cast<absl::FunctionRef<void*(void*)>*>(caller_context);
-  fn(current);
+  return (*fn)(current);
 }
 
 }  // namespace
@@ -39,14 +72,14 @@ extern "C" void* MutateCallbackWrapper(void* current, void* caller_context) {
 // }
 
 void Rax::MutateTarget(absl::string_view word,
-                        absl::FunctionRef<void*(void*)> mutate) {
+                       absl::FunctionRef<void*(void*)> mutate) {
   CHECK(!word.empty()) << "Can't mutate the target for an empty word";
 
   unsigned char* c_word = const_cast<unsigned char*>(
       reinterpret_cast<const unsigned char*>(word.data()));
   void* opaque_callback = reinterpret_cast<void*>(&mutate);
   int res = raxMutate(rax_, c_word, word.size(), MutateCallbackWrapper, opaque_callback);
-  CHECK(res) << "Rax mutation failed";
+  CHECK(res) << "Rax mutation failed for word: " << word << ", errno: " << errno << " (" << strerror(errno) << ")";
 }
 
 size_t Rax::GetTotalWordCount() const { return raxSize(rax_); }
@@ -111,7 +144,9 @@ typename Rax::WordIterator& Rax::WordIterator::operator=(
   return *this;
 }
 
-bool Rax::WordIterator::Done() const { return !valid_ || raxEOF(&iter_); }
+bool Rax::WordIterator::Done() const { 
+  return !valid_ || raxEOF(const_cast<raxIterator*>(&iter_)); 
+}
 
 void Rax::WordIterator::Next() {
   if (Done()) return;
