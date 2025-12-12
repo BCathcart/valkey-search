@@ -94,6 +94,10 @@ size_t Rax::GetLongestWord() const {
   return 0;
 }
 
+bool Rax::IsValid() const { 
+  return rax_ != nullptr && raxSize(rax_) > 0; 
+}
+
 Rax::WordIterator Rax::GetWordIterator(absl::string_view prefix) const {
   return WordIterator(rax_, prefix);
 }
@@ -105,10 +109,14 @@ Rax::WordIterator::WordIterator(rax* rax, absl::string_view prefix)
   raxStart(&iter_, rax);
 
   // Seek to prefix with ">=" operator (works for empty prefix too)
-  valid_ = raxSeek(&iter_, ">=",
-                   const_cast<unsigned char*>(
-                       reinterpret_cast<const unsigned char*>(prefix.data())),
-                   prefix.size());
+  int seek_result = raxSeek(&iter_, ">=",
+                            const_cast<unsigned char*>(
+                                reinterpret_cast<const unsigned char*>(prefix.data())),
+                            prefix.size());
+  
+  // After raxSeek, we need to call raxNext to actually position at the first data node
+  // raxSeek positions the iterator in the tree but doesn't guarantee we're at a data node
+  valid_ = seek_result && raxNext(&iter_);
 
   // Check if we're still in the prefix range
   if (valid_ && !raxEOF(&iter_)) {

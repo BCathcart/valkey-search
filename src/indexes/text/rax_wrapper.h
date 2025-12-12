@@ -147,6 +147,9 @@ public:
   // pre-size arrays and strings that are used when iterating on this RadixTree.
   size_t GetLongestWord() const;
 
+  // Check if the Rax tree is valid (not moved-from or null)
+  bool IsValid() const;
+
   // Create a word Iterator over the sequence of words that start with the
   // prefix. The iterator will automatically be positioned to the lexically
   // smallest word and will end with the last word that shares the suffix.
