@@ -351,13 +351,6 @@ void TextIndexSchema::DeleteKeyData(const InternedStringPtr &key) {
   auto iter = key_index.GetPrefix().GetWordIterator("");
   std::lock_guard<std::mutex> schema_guard(text_index_mutex_);
   while (!iter.Done()) {
-    // Clean up the reference held by the per-key tree(s)
-    void *target = iter.GetTarget();
-    for (int i = 0; i < (suffix_opt.has_value() ? 2 : 1); i++) {
-      InvasivePtr<Postings>::AdoptRaw(
-          static_cast<InvasivePtr<Postings>::RefCountWrapper *>(target));
-    }
-
     // Remove the key from the schema-level trees
     std::string_view word = iter.GetWord();
     text_index_->GetPrefix().MutateTarget(word, target_remove_fn);
