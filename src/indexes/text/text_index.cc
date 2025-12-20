@@ -19,6 +19,14 @@ namespace valkey_search::indexes::text {
 // Track current TextIndexSchema for accessing metadata
 thread_local TextIndexSchema *current_schema_ = nullptr;
 
+// InvasivePtr<Postings> deletion callback
+static void FreePostingsCallback(void* target) {
+  if (target) {
+    auto* wrapper = static_cast<InvasivePtr<Postings>::RefCountWrapper*>(target);
+    InvasivePtr<Postings>::AdoptRaw(wrapper);
+  }
+}
+
 TextIndexSchema *GetTextIndexSchema() {
   CHECK(current_schema_ != nullptr) << "No TextIndexSchema context set";
   return current_schema_;
@@ -89,45 +97,10 @@ InvasivePtr<Postings> RemoveKeyFromPostings(
 /*** TextIndex ***/
 
 TextIndex::TextIndex(bool suffix)
-    : suffix_tree_(suffix ? std::make_unique<Rax>() : nullptr) {}
+    : prefix_tree_(FreePostingsCallback),
+      suffix_tree_(suffix ? std::make_unique<Rax>(FreePostingsCallback) : nullptr) {}
 
-TextIndex::~TextIndex() {
-  // Clean up posting objects referenced by prefix tree
-  if (prefix_tree_.IsValid()) {
-    auto prefix_iter = prefix_tree_.GetWordIterator("");
-    int i = 0;
-    while (!prefix_iter.Done()) {
-      // std::cout << "Iteration: " << i++ << std::endl;
-      void *target = prefix_iter.GetTarget();
-      if (target) {
-        auto* wrapper = static_cast<InvasivePtr<Postings>::RefCountWrapper*>(target);
-        // std::cout << "PREFIX TREE - word: '" << prefix_iter.GetWord() 
-        //           << "' ptr: " << target 
-        //           << " refcount: " << wrapper->refcount_.load() << std::endl;
-        
-        InvasivePtr<Postings>::AdoptRaw(wrapper);
-      }
-      prefix_iter.Next();
-    }
-  }
-
-  // Clean up posting objects referenced by suffix tree
-  if (suffix_tree_) {
-    auto suffix_iter = suffix_tree_->GetWordIterator("");
-    while (!suffix_iter.Done()) {
-      void *target = suffix_iter.GetTarget();
-      if (target) {
-        auto* wrapper = static_cast<InvasivePtr<Postings>::RefCountWrapper*>(target);
-        // std::cout << "SUFFIX TREE - word: '" << suffix_iter.GetWord() 
-        //           << "' ptr: " << target 
-        //           << " refcount: " << wrapper->refcount_.load() << std::endl;
-        
-        InvasivePtr<Postings>::AdoptRaw(wrapper);
-      }
-      suffix_iter.Next();
-    }
-  }
-}
+TextIndex::~TextIndex() = default;
 
 Rax &TextIndex::GetPrefix() { return prefix_tree_; }
 

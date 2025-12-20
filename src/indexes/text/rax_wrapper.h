@@ -84,7 +84,9 @@ public:
   class WordIterator;
   class PathIterator;
 
-  Rax();
+  // Constructor with optional deletion callback for targets.
+  // If provided, callback will be invoked for each target during destruction.
+  explicit Rax(void (*free_callback)(void*) = nullptr);
   ~Rax();
   
   // Move constructor and assignment
@@ -212,6 +214,7 @@ public:
 
   rax* rax_;  // TODO(BRENNAN): Embed directly at the end after getting it
               // working
+  void (*free_callback_)(void*);  // Optional callback for freeing targets
 
  public:
   //

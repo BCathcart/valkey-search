@@ -15,31 +15,36 @@
 namespace valkey_search::indexes::text {
 
 // Constructor
-Rax::Rax() : rax_(raxNew()) {
+Rax::Rax(void (*free_callback)(void*)) 
+    : rax_(raxNew()), free_callback_(free_callback) {
   CHECK(rax_ != nullptr) << "Failed to create rax tree";
 }
 
 // Destructor
 Rax::~Rax() {
   if (rax_) {
-    raxFree(rax_);
+    raxFreeWithCallback(rax_, free_callback_);
     rax_ = nullptr;
   }
 }
 
 // Move constructor
-Rax::Rax(Rax&& other) noexcept : rax_(other.rax_) {
+Rax::Rax(Rax&& other) noexcept 
+    : rax_(other.rax_), free_callback_(other.free_callback_) {
   other.rax_ = nullptr;
+  other.free_callback_ = nullptr;
 }
 
 // Move assignment
 Rax& Rax::operator=(Rax&& other) noexcept {
   if (this != &other) {
     if (rax_) {
-      raxFree(rax_);
+      raxFreeWithCallback(rax_, free_callback_);
     }
     rax_ = other.rax_;
+    free_callback_ = other.free_callback_;
     other.rax_ = nullptr;
+    other.free_callback_ = nullptr;
   }
   return *this;
 }
