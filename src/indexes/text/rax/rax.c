@@ -35,8 +35,8 @@
 #include <stdio.h>
 #include <errno.h>
 #include <math.h>
+#include <assert.h>
 #include "rax.h"
-#include "serverassert.h"
 
 #ifndef RAX_MALLOC_INCLUDE
 #define RAX_MALLOC_INCLUDE "rax_malloc.h"
@@ -919,14 +919,16 @@ int raxFind(rax *rax, unsigned char *s, size_t len, void **value) {
 
 /* Atomically mutates the value at the given key by calling the provided
  * callback function. The callback receives the current value (NULL if the
- * key doesn't exist) and userdata, and returns the new value (NULL to delete
- * the key).
+ * key doesn't exist) and caller context, and returns the new value (NULL
+ * to delete the key).
  * 
  * OWNERSHIP: The callback takes ownership of the old value. If returning a
- * new value, the callback MUST clean up/free the old value.
+ * new value, the callback MUST clean up the old value.
  * 
  * Returns 1 on success, 0 on error (errno will be set to ENOMEM
  * on out of memory). */
+// TODO(Brennan): implement a lower-level version that doesn't traverse the
+// tree twice.
 int raxMutate(rax *rax, unsigned char *s, size_t len, raxMutateCallback callback, void *caller_context) {
     void *current_value = NULL;
 
@@ -949,11 +951,7 @@ int raxMutate(rax *rax, unsigned char *s, size_t len, raxMutateCallback callback
         if (new_value == current_value) {
             return 1;
         }
-        /* Insert or update the key.
-         * NOTE: We don't need to pass old pointer because the callback already
-         * handled ownership of current_value. When updating, raxInsert will
-         * overwrite the stored pointer with new_value. */
-        errno = 0;  /* Clear errno before the operation */
+        /* Insert or update the key. */
         int res = raxInsert(rax, s, len, new_value, NULL);
         if (res == 0 && errno != 0) {
             /* Actual failure (OOM) */

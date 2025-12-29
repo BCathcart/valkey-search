@@ -100,8 +100,6 @@ TextIndex::TextIndex(bool suffix)
     : prefix_tree_(FreePostingsCallback),
       suffix_tree_(suffix ? std::make_unique<Rax>(FreePostingsCallback) : nullptr) {}
 
-TextIndex::~TextIndex() = default;
-
 Rax &TextIndex::GetPrefix() { return prefix_tree_; }
 
 const Rax &TextIndex::GetPrefix() const { return prefix_tree_; }
