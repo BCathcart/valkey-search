@@ -22,8 +22,8 @@ thread_local TextIndexSchema *current_schema_ = nullptr;
 // InvasivePtr<Postings> deletion callback
 static void FreePostingsCallback(void* target) {
   if (target) {
-    auto* wrapper = static_cast<InvasivePtr<Postings>::RefCountWrapper*>(target);
-    InvasivePtr<Postings>::AdoptRaw(wrapper);
+    auto raw = static_cast<InvasivePtrRaw<Postings>>(target);
+    InvasivePtr<Postings>::AdoptRaw(raw);
   }
 }
 
@@ -209,7 +209,7 @@ void TextIndexSchema::CommitKeyData(const InternedStringPtr &key) {
       // one. It will be deconstructed at the end of this scope.
       auto existing_postings =
           old_val ? InvasivePtr<Postings>::AdoptRaw(
-                        static_cast<InvasivePtr<Postings>::RefCountWrapper *>(
+                        static_cast<InvasivePtrRaw<Postings>>(
                             old_val))
                   : InvasivePtr<Postings>{};
 
@@ -229,7 +229,7 @@ void TextIndexSchema::CommitKeyData(const InternedStringPtr &key) {
       // one. It will be deconstructed at the end of this scope.
       auto existing_postings =
           old_val ? InvasivePtr<Postings>::AdoptRaw(
-                        static_cast<InvasivePtr<Postings>::RefCountWrapper *>(
+                        static_cast<InvasivePtrRaw<Postings>>(
                             old_val))
                   : InvasivePtr<Postings>{};
 
@@ -288,7 +288,7 @@ void TextIndexSchema::DeleteKeyData(const InternedStringPtr &key) {
     // It will be deconstructed at the end of this scope.
     auto existing_postings =
         old_val ? InvasivePtr<Postings>::AdoptRaw(
-                      static_cast<InvasivePtr<Postings>::RefCountWrapper *>(
+                      static_cast<InvasivePtrRaw<Postings>>(
                           old_val))
                 : InvasivePtr<Postings>{};
 
@@ -308,7 +308,7 @@ void TextIndexSchema::DeleteKeyData(const InternedStringPtr &key) {
     // one. It will be deconstructed at the end of this scope.
     auto existing_postings =
         old_val ? InvasivePtr<Postings>::AdoptRaw(
-                      static_cast<InvasivePtr<Postings>::RefCountWrapper *>(
+                      static_cast<InvasivePtrRaw<Postings>>(
                           old_val))
                 : InvasivePtr<Postings>{};
 

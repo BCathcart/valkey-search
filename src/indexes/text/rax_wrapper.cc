@@ -229,7 +229,7 @@ void* Rax::WordIterator::GetTarget() const {
 
 InvasivePtr<Postings> Rax::WordIterator::GetPostingsTarget() const {
   return InvasivePtr<Postings>::CopyRaw(
-      static_cast<InvasivePtr<Postings>::RefCountWrapper*>(GetTarget()));
+      static_cast<InvasivePtrRaw<Postings>>(GetTarget()));
 }
 
 /*** PathIterator ***/
