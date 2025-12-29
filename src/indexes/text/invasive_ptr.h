@@ -11,26 +11,39 @@
 #include <atomic>
 #include <cstdint>
 #include <utility>
-#include <iostream> // <--- Added for std::cout (and assumed vmsdk/src/log.h doesn't hide it)
-#include <sanitizer/common_interface_defs.h>
-
-#include "vmsdk/src/log.h"
 
 namespace valkey_search::indexes::text {
 
 /**
- * ... (Doc comments omitted for brevity)
+ * @brief A memory-efficient shared pointer.
+ *
+ * InvasivePtr manages the lifetime of objects through atomic reference
+ * counting, storing the reference count alongside the managed object.
+ *
+ * Thread-safety: Reference counting operations are atomic and thread-safe.
+ * The managed object itself is not protected by this class.
+ *
+ * @tparam T The type of object to manage
+ *
+ * Example usage:
+ * @code
+ *   auto ptr = InvasivePtr<MyClass>::Make(arg1, arg2);
+ *   InvasivePtr<MyClass> copy = ptr;  // Increments refcount
+ *   ptr->method();                    // Access managed object
+ * @endcode
  */
 template <typename T>
 class InvasivePtr {
  public:
-  struct RefCountWrapper {
+   struct RefCountWrapper {
     template <typename... Args>
-    explicit RefCountWrapper(Args &&...args)
+    explicit RefCountWrapper(Args&&... args)
         : data_(std::forward<Args>(args)...) {}
 
-    std::atomic<uint32_t> refcount_ = 1;
-    T data_;
+    private:
+      friend InvasivePtr;
+      std::atomic<uint32_t> refcount_ = 1;
+      T data_;
   };
 
   InvasivePtr() = default;
@@ -39,14 +52,58 @@ class InvasivePtr {
 
   // Factory constructor
   template <typename... Args>
-  static InvasivePtr Make(Args &&...args) {
+  static InvasivePtr Make(Args&&... args) {
     InvasivePtr result;
     result.ptr_ = new RefCountWrapper(std::forward<Args>(args)...);
     return result;
   }
 
-  // Adopts a raw RefCountWrapper pointer without modifying its reference count.
-  // Every Release() should be paired with a corresponding AdoptRaw() later to
+  ~InvasivePtr() { ReleaseRef(); }
+
+  // Copy semantics
+  InvasivePtr(const InvasivePtr& other) : ptr_(other.ptr_) { AddRef(); }
+
+  InvasivePtr& operator=(const InvasivePtr& other) {
+    if (this != &other) {
+      ReleaseRef();
+      ptr_ = other.ptr_;
+      AddRef();
+    }
+    return *this;
+  }
+
+  InvasivePtr& operator=(std::nullptr_t) noexcept {
+    Clear();
+    return *this;
+  }
+
+  // Move semantics
+  InvasivePtr(InvasivePtr&& other) noexcept : ptr_(other.ptr_) {
+    other.ptr_ = nullptr;
+  }
+
+  InvasivePtr& operator=(InvasivePtr&& other) noexcept {
+    if (this != &other) {
+      ReleaseRef();
+      ptr_ = other.ptr_;
+      other.ptr_ = nullptr;
+    }
+    return *this;
+  }
+
+  // Raw move/copy semantics
+
+  // Transfers ownership to caller without decrementing refcount.
+  // Caller must reconstruct via AdoptRaw() to restore memory management.
+  // Freeing the memory directly is very dangerous - you must be certain there
+  // are no other references.
+  RefCountWrapper *ReleaseRaw() && {
+    RefCountWrapper *result = ptr_;
+    ptr_ = nullptr;
+    return result;
+  }
+
+  // Every ReleaseRaw() should be paired with a corresponding AdoptRaw() later to
   // restore safe memory management.
   static InvasivePtr AdoptRaw(RefCountWrapper *wrapper) {
     return InvasivePtr(wrapper);
@@ -61,107 +118,42 @@ class InvasivePtr {
     }
     InvasivePtr result;
     result.ptr_ = wrapper;
-    result.AddRef(); // <--- This is fine because it's on 'result', not 'this'
+    result.AddRef();
     return result;
   }
 
-  ~InvasivePtr() { this->ReleaseRef(); } // <-- FIX: Added this->
-
-  // Copy semantics
-  InvasivePtr(const InvasivePtr &other) : ptr_(other.ptr_) { this->AddRef(); } // <-- FIX: Added this->
-
-  InvasivePtr &operator=(const InvasivePtr &other) {
-    if (this != &other) {
-      this->ReleaseRef(); // <-- FIX: Added this->
-      ptr_ = other.ptr_;
-      this->AddRef();     // <-- FIX: Added this->
-    }
-    return *this;
-  }
-
-  InvasivePtr &operator=(std::nullptr_t) noexcept {
-    this->Clear(); // <--- Clear() calls ReleaseRef, so this is fine
-    return *this;
-  }
-
-  // Move semantics
-  InvasivePtr(InvasivePtr &&other) noexcept : ptr_(other.ptr_) {
-    other.ptr_ = nullptr;
-    // NOTE: This constructor DOES NOT call ReleaseRef() on *this* because 'this'
-    // is being initialized and does not own an object yet. The original version
-    // of your code was correct here. (If you saw an error here earlier, it was 
-    // likely a remnant or from another spot).
-  }
-
-  InvasivePtr &operator=(InvasivePtr &&other) noexcept {
-    if (this != &other) {
-      this->ReleaseRef(); // <-- FIX: Added this->
-      ptr_ = other.ptr_;
-      other.ptr_ = nullptr;
-    }
-    return *this;
-  }
-
   // Access operators
-  T &operator*() const { return ptr_->data_; }
-  T *operator->() const { return &ptr_->data_; }
+  T& operator*() const { return ptr_->data_; }
+  T* operator->() const { return &ptr_->data_; }
 
   // Boolean conversion
   explicit operator bool() const { return ptr_ != nullptr; }
 
   // Comparison operators
-  auto operator<=>(const InvasivePtr &) const = default;
+  auto operator<=>(const InvasivePtr&) const = default;
 
   // Resets to the default nullptr state
   void Clear() {
-    this->ReleaseRef(); // <-- FIX: Added this->
+    ReleaseRef();
     ptr_ = nullptr;
-  }
-
-  // Transfers ownership to caller without decrementing refcount.
-  // Caller must reconstruct via AdoptRaw() to restore memory management.
-  // Freeing the memory directly is very dangerous - you must be certain there
-  // are no other references.
-  RefCountWrapper *ReleaseRaw() && {
-    RefCountWrapper *result = ptr_;
-    ptr_ = nullptr;
-    return result;
   }
 
  private:
   explicit InvasivePtr(RefCountWrapper *wrapper) : ptr_(wrapper) {}
 
-void ReleaseRef() {
-  // std::cout << "ReleaseRef() ptr_=" << static_cast<void*>(ptr_);
-  if (ptr_) {
-    int old_count = ptr_->refcount_.load(std::memory_order_relaxed);
-    // std::cout << " refcount=" << old_count;
-    int new_count = ptr_->refcount_.fetch_sub(1, std::memory_order_acq_rel);
-    // std::cout << " -> " << (new_count - 1);
-    // if (new_count == 1) {
-    //   std::cout << " [DELETING]";
-    // }
+  void ReleaseRef() {
+    if (ptr_ && ptr_->refcount_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+      delete ptr_;
+    }
   }
-  // std::cout << std::endl;
-  // __sanitizer_print_stack_trace();
-  if (ptr_ && ptr_->refcount_.load(std::memory_order_relaxed) == 0) {
-    delete ptr_;
-  }
-}
 
-void AddRef() {
-  // std::cout << "AddRef() ptr_=" << static_cast<void*>(ptr_);
-  if (ptr_) {
-    int old_count = ptr_->refcount_.load(std::memory_order_relaxed);
-    // std::cout << " refcount=" << old_count;
-    ptr_->refcount_.fetch_add(1, std::memory_order_relaxed);
-    // std::cout << " -> " << (old_count + 1);
+  void AddRef() {
+    if (ptr_) {
+      ptr_->refcount_.fetch_add(1, std::memory_order_relaxed);
+    }
   }
-  // std::cout << std::endl;
-  // __sanitizer_print_stack_trace();
-}
 
-  RefCountWrapper *ptr_ = nullptr;
+  RefCountWrapper* ptr_ = nullptr;
 };
 
 }  // namespace valkey_search::indexes::text
