@@ -14,6 +14,19 @@
 
 namespace valkey_search::indexes::text {
 
+namespace {
+
+// C-compatible callback wrapper
+// We can't pass the mutation callback closure directly to C APIs, so we wrap it
+// in a C-style function and pass the closure as opaque caller context.
+extern "C" void* MutateCallbackWrapper(void* current, void* caller_context) {
+  auto* fn = static_cast<absl::FunctionRef<void*(void*)>*>(caller_context);
+  return (*fn)(current);
+}
+
+}  // namespace
+
+
 // Constructor
 Rax::Rax(void (*free_callback)(void*)) 
     : rax_(raxNew()), free_callback_(free_callback) {
@@ -49,33 +62,6 @@ Rax& Rax::operator=(Rax&& other) noexcept {
   return *this;
 }
 
-namespace {
-
-// C-compatible callback wrapper
-// We can't pass the mutation callback closure directly to C APIs, so we wrap it
-// in a C-style function and pass the closure as opaque caller data.
-extern "C" void* MutateCallbackWrapper(void* current, void* caller_context) {
-  auto* fn = static_cast<absl::FunctionRef<void*(void*)>*>(caller_context);
-  return (*fn)(current);
-}
-
-}  // namespace
-
-// TODO: return the old pointer to the caller for both SetTarget and
-// MutateTarget
-// or maybe for SetTarget we use the same mutate API but the closure
-// has the new pointer to return. We simply destroy the old one
-
-// template <typename TargetPtr>
-// TargetPtr RadixTree::SetTarget(absl::string_view word,
-//                                           TargetPtr new_target) {
-//   CHECK(!word.empty()) << "Can't add the target for an empty word";
-//   void* old_ptr = nullptr;
-//   raxInsert(rax_, const_cast<unsigned char*>(word.data()), word.size(),
-//             reinterpret_cast<void*>(new_target), &old_ptr);
-//   return reinterpret_cast(old_ptr);
-// }
-
 void Rax::MutateTarget(absl::string_view word,
                        absl::FunctionRef<void*(void*)> mutate) {
   CHECK(!word.empty()) << "Can't mutate the target for an empty word";
@@ -107,7 +93,7 @@ Rax::WordIterator Rax::GetWordIterator(absl::string_view prefix) const {
   return WordIterator(rax_, prefix);
 }
 
-// WordIterator implementation
+/*** WordIterator ***/
 
 Rax::WordIterator::WordIterator(rax* rax, absl::string_view prefix)
     : prefix_(prefix) {
