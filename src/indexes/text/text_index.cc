@@ -17,7 +17,7 @@ namespace valkey_search::indexes::text {
 // Track current TextIndexSchema for accessing metadata
 thread_local TextIndexSchema* current_schema_ = nullptr;
 
-// InvasivePtr<Postings> deletion callback
+// InvasivePtrRaw<Postings> deletion
 static void FreePostingsCallback(void* target) {
   if (target) {
     auto raw = static_cast<InvasivePtrRaw<Postings>>(target);
@@ -25,7 +25,7 @@ static void FreePostingsCallback(void* target) {
   }
 }
 
-TextIndexSchema *GetTextIndexSchema() {
+TextIndexSchema* GetTextIndexSchema() {
   CHECK(current_schema_ != nullptr) << "No TextIndexSchema context set";
   return current_schema_;
 }
@@ -90,17 +90,33 @@ InvasivePtr<Postings> RemoveKeyFromPostings(
   return existing_postings;
 }
 
+std::function<void*(void*)> CreateTargetSetFn(InvasivePtr<Postings>& updated_target) {
+  return [&updated_target](void* old_val) -> void* {
+    // Take ownership of the existing postings object reference if there is one.
+    // It will be deconstructed as it falls out of scope.
+    if (old_val) {
+      InvasivePtr<Postings>::AdoptRaw(
+          static_cast<InvasivePtrRaw<Postings>>(old_val));
+    }
+    // Grab a new reference to the new shared postings object and pass ownership of
+    // it to the tree.
+    InvasivePtr<Postings> copy = updated_target;
+    return static_cast<void *>(std::move(copy).ReleaseRaw());
+  };
+}
+
 }  // namespace
 
 /*** TextIndex ***/
 
 TextIndex::TextIndex(bool suffix)
     : prefix_tree_(FreePostingsCallback),
-      suffix_tree_(suffix ? std::make_unique<Rax>(FreePostingsCallback) : nullptr) {}
+      suffix_tree_(suffix ? std::make_unique<Rax>(FreePostingsCallback)
+                          : nullptr) {}
 
-Rax &TextIndex::GetPrefix() { return prefix_tree_; }
+Rax& TextIndex::GetPrefix() { return prefix_tree_; }
 
-const Rax &TextIndex::GetPrefix() const { return prefix_tree_; }
+const Rax& TextIndex::GetPrefix() const { return prefix_tree_; }
 
 std::optional<std::reference_wrapper<Rax>> TextIndex::GetSuffix() {
   if (!suffix_tree_) {
@@ -188,12 +204,11 @@ void TextIndexSchema::CommitKeyData(const InternedStringPtr& key) {
                      std::string(token.rbegin(), token.rend()))
                : std::nullopt;
 
+    // The updated target gets set in target_add_fn and later used in
+    // target_set_fn, so that all trees point to the same postings object
     InvasivePtr<Postings> updated_target;
 
-    // Update the postings object for the token in the schema-level index with
-    // the key and position map
-
-    auto target_add_fn = [&](void *old_val) {
+    auto target_add_fn = [&](void* old_val) {
       // Note: Right now this won't include the position map memory since
       // it's already allocated and moved into the postings object. Once
       // we start creating a serialized version instead then it will be
@@ -205,8 +220,7 @@ void TextIndexSchema::CommitKeyData(const InternedStringPtr& key) {
       // one. It will be deconstructed at the end of this scope.
       auto existing_postings =
           old_val ? InvasivePtr<Postings>::AdoptRaw(
-                        static_cast<InvasivePtrRaw<Postings>>(
-                            old_val))
+                        static_cast<InvasivePtrRaw<Postings>>(old_val))
                   : InvasivePtr<Postings>{};
 
       // Mutate the postings
@@ -217,24 +231,13 @@ void TextIndexSchema::CommitKeyData(const InternedStringPtr& key) {
       updated_target = new_postings;
 
       // Pass ownership of the new postings object reference to the tree
-      return static_cast<void *>(std::move(new_postings).ReleaseRaw());
+      return static_cast<void*>(std::move(new_postings).ReleaseRaw());
     };
 
-    auto target_set_fn = [&](void *old_val) {
-      // Take ownership of the existing postings object reference if there is
-      // one. It will be deconstructed at the end of this scope.
-      auto existing_postings =
-          old_val ? InvasivePtr<Postings>::AdoptRaw(
-                        static_cast<InvasivePtrRaw<Postings>>(
-                            old_val))
-                  : InvasivePtr<Postings>{};
+    auto target_set_fn = CreateTargetSetFn(updated_target);
 
-      // Grab a new reference to the shared posings object and pass ownership of
-      // it to the tree.
-      InvasivePtr<Postings> copy = updated_target;
-      return static_cast<void *>(std::move(copy).ReleaseRaw());
-    };
-
+    // Update the postings object for the token in the schema-level index with
+    // the key and position map
     {
       std::lock_guard<std::mutex> schema_guard(text_index_mutex_);
       text_index_->GetPrefix().MutateTarget(token, target_add_fn);
@@ -260,7 +263,7 @@ void TextIndexSchema::CommitKeyData(const InternedStringPtr& key) {
   }
 }
 
-void TextIndexSchema::DeleteKeyData(const InternedStringPtr &key) {
+void TextIndexSchema::DeleteKeyData(const InternedStringPtr& key) {
   current_schema_ = this;
   NestedMemoryScope scope{metadata_.text_index_memory_pool_};
 
@@ -273,19 +276,20 @@ void TextIndexSchema::DeleteKeyData(const InternedStringPtr &key) {
       return;
     }
   }
-  TextIndex &key_index = node.mapped();
+  TextIndex& key_index = node.mapped();
 
+  // The updated target gets set in target_remove_fn and later used in
+  // target_set_fn, so that all trees point to the same postings object
   InvasivePtr<Postings> updated_target;
 
-  auto target_remove_fn = [&](void *old_val) {
+  auto target_remove_fn = [&](void* old_val) {
     NestedMemoryScope scope{metadata_.posting_memory_pool_};
 
     // Take ownership of the existing postings object reference if there is one.
     // It will be deconstructed at the end of this scope.
     auto existing_postings =
         old_val ? InvasivePtr<Postings>::AdoptRaw(
-                      static_cast<InvasivePtrRaw<Postings>>(
-                          old_val))
+                      static_cast<InvasivePtrRaw<Postings>>(old_val))
                 : InvasivePtr<Postings>{};
 
     // Mutate the postings
@@ -296,22 +300,7 @@ void TextIndexSchema::DeleteKeyData(const InternedStringPtr &key) {
     updated_target = new_postings;
 
     // Pass ownership of the new postings object reference to the tree
-    return static_cast<void *>(std::move(new_postings).ReleaseRaw());
-  };
-
-  auto target_set_fn = [&](void *old_val) {
-    // Take ownership of the existing postings object reference if there is
-    // one. It will be deconstructed at the end of this scope.
-    auto existing_postings =
-        old_val ? InvasivePtr<Postings>::AdoptRaw(
-                      static_cast<InvasivePtrRaw<Postings>>(
-                          old_val))
-                : InvasivePtr<Postings>{};
-
-    // Grab a new reference to the shared posings object and pass ownership of
-    // it to the tree.
-    InvasivePtr<Postings> copy = updated_target;
-    return static_cast<void *>(std::move(copy).ReleaseRaw());
+    return static_cast<void*>(std::move(new_postings).ReleaseRaw());
   };
 
   // Cleanup schema-level text index
@@ -324,7 +313,8 @@ void TextIndexSchema::DeleteKeyData(const InternedStringPtr &key) {
     text_index_->GetPrefix().MutateTarget(word, target_remove_fn);
     if (suffix_opt.has_value()) {
       std::string reverse_word(word.rbegin(), word.rend());
-      suffix_opt.value().get().MutateTarget(reverse_word, target_set_fn);
+      suffix_opt.value().get().MutateTarget(reverse_word,
+                                            CreateTargetSetFn(updated_target));
     }
     iter.Next();
   }

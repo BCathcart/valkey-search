@@ -67,10 +67,8 @@ class TextIndex {
   explicit TextIndex(bool suffix);
   Rax& GetPrefix();
   const Rax& GetPrefix() const;
-  std::optional<std::reference_wrapper<Rax>>
-  GetSuffix();
-  std::optional<std::reference_wrapper<const Rax>>
-  GetSuffix() const;
+  std::optional<std::reference_wrapper<Rax>> GetSuffix();
+  std::optional<std::reference_wrapper<const Rax>> GetSuffix() const;
 
  private:
   Rax prefix_tree_;

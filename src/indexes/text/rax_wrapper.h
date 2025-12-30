@@ -67,23 +67,6 @@ public:
   Rax& operator=(const Rax&) = delete;
 
   //
-  // Adds the target for the given word, replacing the existing target
-  // if there is one. Providing an empty target will cause the word to be
-  // deleted from the tree. Only use this API when you don't care about any
-  // existing target.
-  //
-  // (TODO) This function is explicitly multi-thread safe and is
-  // designed to allow other mutations to be performed on other words and
-  // targets simultaneously, with minimal collisions.
-  //
-  // It's expected that the caller will know whether or not the word
-  // exists. Passing in a word that doesn't exist along with a
-  // nullopt new_target will cause the word to be added and
-  // then immediately deleted from the tree.
-  //
-  // void SetTarget(absl::string_view word, TargetPtr new_target);
-
-  //
   // Applies the mutation function to the current target of the word to generate
   // a new target. If the word doesn't already exist, a path for it will be
   // first added to the tree with a default-constructed target. The new target
