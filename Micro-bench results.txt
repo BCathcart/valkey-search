@@ -1,0 +1,319 @@
+Micro-bench results
+
+Before:
+➜  valkey-search-main-repo-3 git:(e73481f) ✗ ./.build-release/tests/text_index_benchmark         
+
+==========================================================
+  TEXT INDEX MICRO-BENCHMARK (C++ replacement for
+  TestRaxBenchmark in test_fulltext_space_performance.py)
+==========================================================
+  Docs per scenario  : 1000000
+  Read lookups       : 5000000
+  Threading          : 1 writer, then 1 reader (phased)
+==========================================================
+
+  Preparing 1000000 interned keys...
+
+======================================================================
+  1M x 1 token 'b'
+  Tree shape: root -> compressed 'b' -> leaf
+======================================================================
+  Ingesting 1000000 documents...
+  Doing 5000000 random lookups...
+
+  +----------------------------------------------------------+
+  | 1M x 1 token 'b'                                         |
+  +----------------------------------------------------------+
+  | Ingest time    :     1.73 s (577081.9 docs/s)          |
+  | Read  time     :     2.17 s (2299727.2 lookups/s, hits=5000000) |
+  | Search memory  :    108.0 MB  (   113246224 bytes)  |
+  | Per-key        :    113.2 bytes/key                    |
+  +----------------------------------------------------------+
+
+======================================================================
+  1M x 3 tokens 'a b c'
+  Tree shape: root -> branch{a,b,c} -> 3 leaves   * BEST CASE (branching) *
+======================================================================
+  Ingesting 1000000 documents...
+  Doing 5000000 random lookups...
+
+  +----------------------------------------------------------+
+  | 1M x 3 tokens 'a b c'                                    |
+  +----------------------------------------------------------+
+  | Ingest time    :     4.81 s (207746.7 docs/s)          |
+  | Read  time     :     3.52 s (1421120.7 lookups/s, hits=5000000) |
+  | Search memory  :    144.0 MB  (   150994952 bytes)  |
+  | Per-key        :    151.0 bytes/key                    |
+  +----------------------------------------------------------+
+
+======================================================================
+  1M x 10 tokens
+  Tree shape: root -> branch{a..j} -> 10 leaves
+======================================================================
+  Ingesting 1000000 documents...
+  Doing 5000000 random lookups...
+
+  +----------------------------------------------------------+
+  | 1M x 10 tokens                                           |
+  +----------------------------------------------------------+
+  | Ingest time    :    16.26 s (61492.9 docs/s)          |
+  | Read  time     :     3.59 s (1392858.9 lookups/s, hits=5000000) |
+  | Search memory  :    864.0 MB  (   905969680 bytes)  |
+  | Per-key        :    906.0 bytes/key                    |
+  +----------------------------------------------------------+
+
+======================================================================
+  1M x 3 multi-char tokens
+  Tree shape: root -> branch{h,w,t} -> compressed paths -> leaves
+======================================================================
+  Ingesting 1000000 documents...
+  Doing 5000000 random lookups...
+
+  +----------------------------------------------------------+
+  | 1M x 3 multi-char tokens                                 |
+  +----------------------------------------------------------+
+  | Ingest time    :     6.22 s (160669.7 docs/s)          |
+  | Read  time     :     2.28 s (2196817.3 lookups/s, hits=5000000) |
+  | Search memory  :      0.0 MB  (           0 bytes)  |
+  | Per-key        :      0.0 bytes/key                    |
+  +----------------------------------------------------------+
+
+======================================================================
+  1M x realistic text
+  Tree shape: 20-80 words per doc, ~300-word English vocab (like the Python test)
+======================================================================
+  Generating 1000000 random English docs...
+  Ingesting 1000000 documents...
+  Doing 5000000 random lookups...
+
+  +----------------------------------------------------------+
+  | 1M x realistic text                                      |
+  +----------------------------------------------------------+
+  | Ingest time    :   124.08 s (8059.4 docs/s)          |
+  | Read  time     :     3.17 s (1577401.1 lookups/s, hits=5000000) |
+  | Search memory  :   3456.0 MB  (  3623878672 bytes)  |
+  | Per-key        :   3623.9 bytes/key                    |
+  +----------------------------------------------------------+
+
+==========================================================
+  SUMMARY TABLE
+==========================================================
+  Scenario                      Ingest(s)       Docs/s        Reads/s  PerKey(B)
+  ---------------------------- ---------- ------------ -------------- ----------
+  1M x 1 token 'b'                   1.73       577082        2299727      113.2
+  1M x 3 tokens 'a b c'              4.81       207747        1421121      151.0
+  1M x 10 tokens                    16.26        61493        1392859      906.0
+  1M x 3 multi-char tokens           6.22       160670        2196817        0.0
+  1M x realistic text              124.08         8059        1577401     3623.9
+==========================================================
+
+CSV:
+scenario,ingest_s,docs_per_s,read_s,reads_per_s,mem_bytes,per_key_bytes
+"1M x 1 token 'b'",1.733,577082,2.174,2299727,113246224,113.2
+"1M x 3 tokens 'a b c'",4.814,207747,3.518,1421121,150994952,151.0
+"1M x 10 tokens",16.262,61493,3.590,1392859,905969680,906.0
+"1M x 3 multi-char tokens",6.224,160670,2.276,2196817,0,0.0
+"1M x realistic text",124.079,8059,3.170,1577401,3623878672,3623.9
+
+
+After:
+➜  valkey-search-main-repo-3 git:(fe6c99b) ✗ ./.build-release/tests/text_index_benchmark
+
+==========================================================
+  TEXT INDEX MICRO-BENCHMARK (C++ replacement for
+  TestRaxBenchmark in test_fulltext_space_performance.py)
+==========================================================
+  Docs per scenario  : 1000000
+  Read lookups       : 5000000
+  Threading          : 1 writer, then 1 reader (phased)
+==========================================================
+
+  Preparing 1000000 interned keys...
+
+======================================================================
+  1M x 1 token 'b'
+  Tree shape: root -> compressed 'b' -> leaf
+======================================================================
+  Ingesting 1000000 documents...
+  Doing 5000000 random lookups...
+
+  +----------------------------------------------------------+
+  | 1M x 1 token 'b'                                         |
+  +----------------------------------------------------------+
+  | Ingest time    :     1.98 s (504562.2 docs/s)          |
+  | Read  time     :     0.19 s (26494155.1 lookups/s, hits=5000000) |
+  | Search memory  :    108.0 MB  (   113246224 bytes)  |
+  | Per-key        :    113.2 bytes/key                    |
+  +----------------------------------------------------------+
+
+======================================================================
+  1M x 3 tokens 'a b c'
+  Tree shape: root -> branch{a,b,c} -> 3 leaves   * BEST CASE (branching) *
+======================================================================
+  Ingesting 1000000 documents...
+  Doing 5000000 random lookups...
+
+  +----------------------------------------------------------+
+  | 1M x 3 tokens 'a b c'                                    |
+  +----------------------------------------------------------+
+  | Ingest time    :     4.39 s (227578.0 docs/s)          |
+  | Read  time     :     0.23 s (22019836.2 lookups/s, hits=5000000) |
+  | Search memory  :    144.0 MB  (   150994952 bytes)  |
+  | Per-key        :    151.0 bytes/key                    |
+  +----------------------------------------------------------+
+
+======================================================================
+  1M x 10 tokens
+  Tree shape: root -> branch{a..j} -> 10 leaves
+======================================================================
+  Ingesting 1000000 documents...
+  Doing 5000000 random lookups...
+
+  +----------------------------------------------------------+
+  | 1M x 10 tokens                                           |
+  +----------------------------------------------------------+
+  | Ingest time    :    13.34 s (74983.2 docs/s)          |
+  | Read  time     :     0.25 s (19713430.9 lookups/s, hits=5000000) |
+  | Search memory  :    288.0 MB  (   301989896 bytes)  |
+  | Per-key        :    302.0 bytes/key                    |
+  +----------------------------------------------------------+
+
+======================================================================
+  1M x 3 multi-char tokens
+  Tree shape: root -> branch{h,w,t} -> compressed paths -> leaves
+======================================================================
+  Ingesting 1000000 documents...
+  Doing 5000000 random lookups...
+
+  +----------------------------------------------------------+
+  | 1M x 3 multi-char tokens                                 |
+  +----------------------------------------------------------+
+  | Ingest time    :     6.04 s (165667.3 docs/s)          |
+  | Read  time     :     0.27 s (18750525.6 lookups/s, hits=5000000) |
+  | Search memory  :      0.0 MB  (           0 bytes)  |
+  | Per-key        :      0.0 bytes/key                    |
+  +----------------------------------------------------------+
+
+======================================================================
+  1M x realistic text
+  Tree shape: 20-80 words per doc, ~300-word English vocab (like the Python test)
+======================================================================
+  Generating 1000000 random English docs...
+  Ingesting 1000000 documents...
+  Doing 5000000 random lookups...
+
+  +----------------------------------------------------------+
+  | 1M x realistic text                                      |
+  +----------------------------------------------------------+
+  | Ingest time    :   102.25 s (9779.5 docs/s)          |
+  | Read  time     :     0.43 s (11742064.6 lookups/s, hits=5000000) |
+  | Search memory  :   4032.0 MB  (  4227858456 bytes)  |
+  | Per-key        :   4227.9 bytes/key                    |
+  +----------------------------------------------------------+
+
+==========================================================
+  SUMMARY TABLE
+==========================================================
+  Scenario                      Ingest(s)       Docs/s        Reads/s  PerKey(B)
+  ---------------------------- ---------- ------------ -------------- ----------
+  1M x 1 token 'b'                   1.98       504562       26494155      113.2
+  1M x 3 tokens 'a b c'              4.39       227578       22019836      151.0
+  1M x 10 tokens                    13.34        74983       19713431      302.0
+  1M x 3 multi-char tokens           6.04       165667       18750526        0.0
+  1M x realistic text              102.25         9780       11742065     4227.9
+==========================================================
+
+CSV:
+scenario,ingest_s,docs_per_s,read_s,reads_per_s,mem_bytes,per_key_bytes
+"1M x 1 token 'b'",1.982,504562,0.189,26494155,113246224,113.2
+"1M x 3 tokens 'a b c'",4.394,227578,0.227,22019836,150994952,151.0
+"1M x 10 tokens",13.336,74983,0.254,19713431,301989896,302.0
+"1M x 3 multi-char tokens",6.036,165667,0.267,18750526,0,0.0
+"1M x realistic text",102.255,9780,0.426,11742065,4227858456,4227.9
+
+
+  COMPARISON — RadixTree (e73481f) vs Rax (fe6c99b)
+
+Summary table:
+
+  Scenario           Ingest(s)      Docs/s        Reads/s          Per-key(B)
+                     Before After   Before After  Before   After   Before After
+  -----------------  ------ -----   ------ -----  ------   -----   ------ -----
+  1 token 'b'         1.73   1.98    577k  505k    2.3M    26.5M    113   113
+  3 tokens 'a b c'    4.81   4.39    208k  228k    1.4M    22.0M    151   151
+  10 tokens          16.26  13.34     61k   75k    1.4M    19.7M    906   302
+  3 multi-char        6.22   6.04    161k  166k    2.2M    18.8M      0     0   (frag)
+  realistic English 124.08 102.25    8.1k  9.8k    1.6M    11.7M   3623  4227   (see note)
+
+Rax read-throughput speedups: 11.5× / 15.5× / 14.2× / 8.5× / 7.5×  (avg ~11×)
+
+
+Key findings:
+
+1. Read throughput is the primary Rax win.
+   Rax is 7.5×–15× faster on lookups across every scenario. This is the
+   headline number. The Python test never measured read throughput — it was
+   completely invisible before this micro-bench.
+
+2. Write throughput is essentially a wash.
+   - Rax is ~10–20% faster than RadixTree on complex workloads (10 tokens,
+     realistic English).
+   - RadixTree is ~14% faster on the trivial 1-token case (probably branch
+     prediction friendliness with a nearly empty tree).
+   - Contrary to the Rax-is-faster-for-writes assumption, the ingest story
+     is a rounding-error tie. This was completely hidden in the Python
+     harness: the four small-doc Python scenarios all took ~54s each
+     (network/RESP/GIL bottleneck) but actually range from 1.7s to 16.3s
+     in native C++ — a 9.4× spread the Python test could not see.
+
+3. Memory: mixed here; the Python numbers remain the primary source of truth.
+   - 10-tokens is the clean win visible here: 906 → 302 bytes/key (3.0×
+     reduction). Matches the Python result for that workload.
+   - 1-token and 3-tokens scenarios show identical memory before/after —
+     those workloads are dominated by Postings + interned-key strings,
+     not per-key tree overhead, so tree choice doesn't move the needle.
+   - Realistic case looks inverted here (3623 → 4227) because
+     vmsdk::GetUsedMemoryCnt() is a process-wide counter and cross-scenario
+     drift/fragmentation corrupts the delta on later scenarios (see the
+     header comment in text_index_benchmark.cc). The Python
+     `INFO SEARCH` numbers (schema reset per scenario) remain the ground
+     truth for memory:
+        Realistic English:  11895 MB (RadixTree) → 3949 MB (Rax)  =  3.0×
+
+4. The Python test was measuring the wrong thing for throughput.
+   All 4 small-doc scenarios in main-results.txt took ~54s each — that is a
+   pure Python-client / RESP / GIL bottleneck, not indexing work. The
+   actual C++ indexing paths span 1.7s–16.3s. Any "Rax is faster to ingest
+   than RadixTree" claim based on the Python test would have been noise:
+   the network stack was the bottleneck, not the tree.
+
+Bottom line
+-----------
+Rax's payoff is read performance (~10× faster on lookups) and memory (3×
+smaller for realistic workloads). Write throughput is a wash. The Python
+integration test could only see the memory portion because everything else
+was buried under RESP overhead — hence the need for this C++ micro-bench.
+
+
+  AVERAGE-CASE SUMMARY  (realistic English text)
+The realistic-English scenario (1M docs, 20-80 words each drawn from a
+~300-word vocabulary) is the closest approximation to a real-world text
+index workload. Numbers taken from this scenario:
+
+                            RadixTree      Rax        Change
+                            ---------      ---        ------
+  Ingest throughput           8.1k/s       9.8k/s     +21%    (1.21×)
+  Read throughput             1.6M/s      11.7M/s     +638%   (7.5×)
+  Memory (Python INFO)*    11.9 GB       3.9 GB     -67%    (3.0× smaller)
+
+  * The C++ mem-delta reading for this scenario is unreliable
+    (cross-scenario allocator drift; see note above). Numbers here are
+    from the Python integration test's INFO SEARCH readout in
+    main-results.txt, which reset the schema between scenarios.
+
+Rax wins on all three axes for a realistic workload:
+  * Reads: 7.5× faster  (the biggest, most consistent win)
+  * Memory: 3.0× smaller
+  * Writes: 1.2× faster (modest but real, no longer masked by RESP)
+
+

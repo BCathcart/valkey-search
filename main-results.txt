@@ -1,0 +1,316 @@
+  SCENARIO 1: 1M documents x 1 token 'b'
+  Tree shape: root -> compressed 'b' -> leaf
+======================================================================
+
+  Ingesting 1,000,000 documents (text: 'b')...
+  Ingestion complete in 53.9s
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ 1M x 1 token 'b'                                           │
+  ├────────────────────────────────────────────────────────────┤
+  │ Search memory:     396.5 MB  ( 415,853,480 bytes)      │
+  │ RSS delta:         437.2 MB                               │
+  │ Per-key:           415.8 bytes/key                         │
+  └────────────────────────────────────────────────────────────┘
+PASSED
+../../../integration/test_fulltext_space_performance.py::TestRaxBenchmark::test_benchmark_three_tokens 
+======================================================================
+  SCENARIO 2: 1M documents x 3 tokens 'a b c'  * BEST CASE *
+  Tree shape: root -> branch{a,b,c} -> 3 leaves
+  This maximizes the std::map overhead in RadixTree
+======================================================================
+
+  Ingesting 1,000,000 documents (text: 'a b c')...
+  Ingestion complete in 53.4s
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ 1M x 3 tokens 'a b c'                                      │
+  ├────────────────────────────────────────────────────────────┤
+  │ Search memory:     474.8 MB  ( 497,881,528 bytes)      │
+  │ RSS delta:         524.4 MB                               │
+  │ Per-key:           497.8 bytes/key                         │
+  └────────────────────────────────────────────────────────────┘
+PASSED
+../../../integration/test_fulltext_space_performance.py::TestRaxBenchmark::test_benchmark_ten_tokens 
+======================================================================
+  SCENARIO 3: 1M documents x 10 tokens
+  Tree shape: root -> branch{a..j} -> 10 leaves
+======================================================================
+
+  Ingesting 1,000,000 documents (text: 'a b c d e f g h i j')...
+  Ingestion complete in 54.7s
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ 1M x 10 tokens                                             │
+  ├────────────────────────────────────────────────────────────┤
+  │ Search memory:     976.9 MB  (1,024,411,384 bytes)      │
+  │ RSS delta:        1055.9 MB                               │
+  │ Per-key:          1024.3 bytes/key                         │
+  └────────────────────────────────────────────────────────────┘
+PASSED
+../../../integration/test_fulltext_space_performance.py::TestRaxBenchmark::test_benchmark_multichar_tokens 
+======================================================================
+  SCENARIO 4: 1M documents x 3 multi-char tokens
+  Tree shape: root -> branch{h,w,t} -> compressed paths -> leaves
+======================================================================
+
+  Ingesting 1,000,000 documents (text: 'hello world test')...
+  Ingestion complete in 53.8s
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ 1M x 3 multi-char tokens                                   │
+  ├────────────────────────────────────────────────────────────┤
+  │ Search memory:     628.3 MB  ( 658,916,184 bytes)      │
+  │ RSS delta:         691.5 MB                               │
+  │ Per-key:           658.9 bytes/key                         │
+
+
+
+
+
+
+
+
+
+fe6c99b319f25d0f2d6b957d3a7f0893e0f650b3:
+
+
+  ======================================================================
+  SCENARIO 1: 1M documents x 1 token 'b'
+  Tree shape: root -> compressed 'b' -> leaf
+======================================================================
+
+  Ingesting 1,000,000 documents (text: 'b')...
+  Ingestion complete in 53.3s
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ 1M x 1 token 'b'                                           │
+  ├────────────────────────────────────────────────────────────┤
+  │ Search memory:     346.0 MB  ( 362,867,528 bytes)      │
+  │ RSS delta:         387.6 MB                               │
+  │ Per-key:           362.8 bytes/key                         │
+  └────────────────────────────────────────────────────────────┘
+PASSED
+../../../integration/test_fulltext_space_performance.py::TestRaxBenchmark::test_benchmark_three_tokens 
+======================================================================
+  SCENARIO 2: 1M documents x 3 tokens 'a b c'  * BEST CASE *
+  Tree shape: root -> branch{a,b,c} -> 3 leaves
+  This maximizes the std::map overhead in RadixTree
+======================================================================
+
+  Ingesting 1,000,000 documents (text: 'a b c')...
+  Ingestion complete in 53.9s
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ 1M x 3 tokens 'a b c'                                      │
+  ├────────────────────────────────────────────────────────────┤
+  │ Search memory:     409.1 MB  ( 429,018,312 bytes)      │
+  │ RSS delta:         461.1 MB                               │
+  │ Per-key:           429.0 bytes/key                         │
+  └────────────────────────────────────────────────────────────┘
+PASSED
+../../../integration/test_fulltext_space_performance.py::TestRaxBenchmark::test_benchmark_ten_tokens 
+======================================================================
+  SCENARIO 3: 1M documents x 10 tokens
+  Tree shape: root -> branch{a..j} -> 10 leaves
+======================================================================
+
+  Ingesting 1,000,000 documents (text: 'a b c d e f g h i j')...
+  Ingestion complete in 53.9s
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ 1M x 10 tokens                                             │
+  ├────────────────────────────────────────────────────────────┤
+  │ Search memory:     804.6 MB  ( 843,751,128 bytes)      │
+  │ RSS delta:         882.0 MB                               │
+  │ Per-key:           843.7 bytes/key                         │
+  └────────────────────────────────────────────────────────────┘
+PASSED
+../../../integration/test_fulltext_space_performance.py::TestRaxBenchmark::test_benchmark_multichar_tokens 
+======================================================================
+  SCENARIO 4: 1M documents x 3 multi-char tokens
+  Tree shape: root -> branch{h,w,t} -> compressed paths -> leaves
+======================================================================
+
+  Ingesting 1,000,000 documents (text: 'hello world test')...
+  Ingestion complete in 53.6s
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ 1M x 3 multi-char tokens                                   │
+  ├────────────────────────────────────────────────────────────┤
+  │ Search memory:     501.5 MB  ( 525,936,904 bytes)      │
+  │ RSS delta:         563.7 MB                               │
+  │ Per-key:           525.9 bytes/key                         │
+  └────────────────────────────────────────────────────────────┘
+
+
+
+
+
+../../../integration/test_fulltext_space_performance.py::TestRaxBenchmark::test_benchmark_realistic_docs 
+======================================================================
+  SCENARIO 5: 1M documents x random English text
+  Each doc: 20-80 words randomly sampled from 300-word vocabulary
+  Simulates real-world product descriptions / article snippets
+======================================================================
+
+  Ingesting 1,000,000 documents (20-80 words each, vocab=329)...
+  Ingestion complete in 85.8s
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ 1M x realistic text                                        │
+  ├────────────────────────────────────────────────────────────┤
+  │ Search memory:    3949.9 MB  (4,141,795,864 bytes)      │
+  │ RSS delta:        4649.3 MB                               │
+  │ Per-key:          4141.7 bytes/key                         │
+  └────────────────────────────────────────────────────────────┘
+
+
+
+
+
+
+
+  e73481fd9cb521b90f51e00ae2b78bd83c7e7a3a:
+
+
+  ======================================================================
+  SCENARIO 1: 1M documents x 1 token 'b'
+  Tree shape: root -> compressed 'b' -> leaf
+======================================================================
+
+  Ingesting 1,000,000 documents (text: 'b')...
+  Ingestion complete in 53.3s
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ 1M x 1 token 'b'                                           │
+  ├────────────────────────────────────────────────────────────┤
+  │ Search memory:     422.3 MB  ( 442,919,416 bytes)      │
+  │ RSS delta:         462.5 MB                               │
+  │ Per-key:           442.9 bytes/key                         │
+  └────────────────────────────────────────────────────────────┘
+PASSED
+../../../integration/test_fulltext_space_performance.py::TestRaxBenchmark::test_benchmark_three_tokens 
+======================================================================
+  SCENARIO 2: 1M documents x 3 tokens 'a b c'  * BEST CASE *
+  Tree shape: root -> branch{a,b,c} -> 3 leaves
+  This maximizes the std::map overhead in RadixTree
+======================================================================
+
+  Ingesting 1,000,000 documents (text: 'a b c')...
+  Ingestion complete in 53.8s
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ 1M x 3 tokens 'a b c'                                      │
+  ├────────────────────────────────────────────────────────────┤
+  │ Search memory:     629.0 MB  ( 659,579,464 bytes)      │
+  │ RSS delta:         679.6 MB                               │
+  │ Per-key:           659.5 bytes/key                         │
+  └────────────────────────────────────────────────────────────┘
+PASSED
+../../../integration/test_fulltext_space_performance.py::TestRaxBenchmark::test_benchmark_ten_tokens 
+======================================================================
+  SCENARIO 3: 1M documents x 10 tokens
+  Tree shape: root -> branch{a..j} -> 10 leaves
+======================================================================
+
+  Ingesting 1,000,000 documents (text: 'a b c d e f g h i j')...
+  Ingestion complete in 54.0s
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ 1M x 10 tokens                                             │
+  ├────────────────────────────────────────────────────────────┤
+  │ Search memory:    1704.2 MB  (1,787,019,336 bytes)      │
+  │ RSS delta:        1785.5 MB                               │
+  │ Per-key:          1787.0 bytes/key                         │
+  └────────────────────────────────────────────────────────────┘
+PASSED
+../../../integration/test_fulltext_space_performance.py::TestRaxBenchmark::test_benchmark_multichar_tokens 
+======================================================================
+  SCENARIO 4: 1M documents x 3 multi-char tokens
+  Tree shape: root -> branch{h,w,t} -> compressed paths -> leaves
+======================================================================
+
+  Ingesting 1,000,000 documents (text: 'hello world test')...
+  Ingestion complete in 53.6s
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ 1M x 3 multi-char tokens                                   │
+  ├────────────────────────────────────────────────────────────┤
+  │ Search memory:    1005.2 MB  (1,054,057,816 bytes)      │
+  │ RSS delta:        1068.2 MB                               │
+  │ Per-key:          1054.0 bytes/key                         │
+  └────────────────────────────────────────────────────────────┘
+PASSED
+
+
+
+
+
+======================================================================
+  SCENARIO 5: 1M documents x random English text
+  Each doc: 20-80 words randomly sampled from 300-word vocabulary
+  Simulates real-world product descriptions / article snippets
+======================================================================
+
+  Ingesting 1,000,000 documents (20-80 words each, vocab=329)...
+  Ingestion complete in 105.0s
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ 1M x realistic text                                        │
+  ├────────────────────────────────────────────────────────────┤
+  │ Search memory:   11895.7 MB  (12,473,648,520 bytes)      │
+  │ RSS delta:       12619.9 MB                               │
+  │ Per-key:         12473.6 bytes/key                         │
+  └────────────────────────────────────────────────────────────┘
+PASSED
+
+
+
+
+
+
+
+
+Before Rax optimization:
+
+
+======================================================================
+  SCENARIO 5: 1M documents x random English text
+  Each doc: 20-80 words randomly sampled from 300-word vocabulary
+  Simulates real-world product descriptions / article snippets
+======================================================================
+
+  Ingesting 1,000,000 documents (20-80 words each, vocab=329)...
+  Ingestion complete in 105.0s
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ 1M x realistic text                                        │
+  ├────────────────────────────────────────────────────────────┤
+  │ Search memory:   11895.7 MB  (12,473,648,520 bytes)      │
+  │ RSS delta:       12619.9 MB                               │
+  │ Per-key:         12473.6 bytes/key                         │
+  └────────────────────────────────────────────────────────────┘
+PASSED
+
+
+
+After Rax optimization:
+
+../../../integration/test_fulltext_space_performance.py::TestRaxBenchmark::test_benchmark_realistic_docs 
+======================================================================
+  SCENARIO 5: 1M documents x random English text
+  Each doc: 20-80 words randomly sampled from 300-word vocabulary
+  Simulates real-world product descriptions / article snippets
+======================================================================
+
+  Ingesting 1,000,000 documents (20-80 words each, vocab=329)...
+  Ingestion complete in 85.8s
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ 1M x realistic text                                        │
+  ├────────────────────────────────────────────────────────────┤
+  │ Search memory:    3949.9 MB  (4,141,795,864 bytes)      │
+  │ RSS delta:        4649.3 MB                               │
+  │ Per-key:          4141.7 bytes/key                         │
+  └────────────────────────────────────────────────────────────┘

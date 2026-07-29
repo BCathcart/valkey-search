@@ -177,3 +177,19 @@ target_include_directories(text_index_test PUBLIC ${CMAKE_CURRENT_LIST_DIR})
 target_link_libraries(text_index_test PRIVATE testing_common_base)
 target_link_libraries(text_index_test PRIVATE text)
 finalize_test_flags(text_index_test)
+
+# 8. Text Index Micro-benchmark (standalone main(); replaces the Python
+#    TestRaxBenchmark in integration/test_fulltext_space_performance.py).
+#    Not registered as a gtest test — invoked manually:
+#      ${CMAKE_BINARY_DIR}/tests/text_index_benchmark
+#
+#    Uses finalize_test_flags() to reuse the exact linker/library setup as
+#    the other test targets (gtest libs are pulled in but unused — cheap).
+add_executable(text_index_benchmark
+    ${CMAKE_CURRENT_LIST_DIR}/text_index_benchmark.cc)
+target_include_directories(text_index_benchmark PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+target_link_libraries(text_index_benchmark PRIVATE testing_common_base)
+target_link_libraries(text_index_benchmark PRIVATE text)
+finalize_test_flags(text_index_benchmark)
+
+
