@@ -1,0 +1,12 @@
+In my mind there are two dimensions to consider. Since we have background reader work and main thread reader work,
+things get a bit hard to reason about. So considering latency is good. Understanding the impact of filtering decision
+on latency is important. Equally we need to consider throughput when the database is saturated (either the main thread
+or the background thread). This could be different because if the main thread becomes the bottleneck for example, then
+the difference on the background may make no difference. This is useful to know. I believe we should consider these two
+dimensions separately. For both, like I said before, we should vary corpus size and test a few different hybrid
+queries:
+- simple tag
+- simple numeric
+- simple text (single term match)
+- complex text (AND/OR with fuzzy or something)
+- complex mix (numeric, tag, text)
