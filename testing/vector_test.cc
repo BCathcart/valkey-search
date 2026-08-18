@@ -14,9 +14,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <numeric>
 #include <optional>
+#include <queue>
+#include <set>
+#include <random>
 #include <string>
 #include <thread>
 #include <utility>
@@ -24,19 +28,31 @@
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
+#include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "src/attribute_data_type.h"
+#include "src/commands/filter_parser.h"
+#include "src/index_schema.h"
 #include "src/index_schema.pb.h"
 #include "src/indexes/index_base.h"
+#include "src/indexes/numeric.h"
+#include "src/indexes/tag.h"
+#include "src/indexes/text.h"
+#include "src/indexes/text/text_fetcher.h"
+#include "src/indexes/text/text_index.h"
 #include "src/indexes/vector_base.h"
 #include "src/indexes/vector_flat.h"
 #include "src/indexes/vector_hnsw.h"
+#include "src/query/predicate.h"
 #include "src/utils/cancel.h"
 #include "src/utils/string_interning.h"
 #include "src/valkey_search_options.h"
@@ -127,6 +143,46 @@ auto IndexToKey = [](int i) {
   return StringInternStore::Intern(std::to_string(i) + "_key");
 };
 
+// Corpus generator for the crossover benchmarks.
+//
+// DeterministicallyGenerateVectors sets element j of vector i to
+// max_value*(i+j)/(size+dim), so every vector is a linear ramp and the whole
+// corpus lies on essentially a one-dimensional line through the embedding
+// space. That is degenerate for a graph index: neighbour lists collapse onto a
+// chain and traversal cost bears little relation to a real corpus. Since the
+// whole point of these benchmarks is finding where inline-filter traversal cost
+// crosses brute-force scan cost, corpus geometry is not incidental, so default
+// to a mixture-of-Gaussians corpus with genuine cluster structure, much closer
+// to real embeddings. Set BENCH_DATA=ramp to reproduce the old numbers.
+inline std::vector<std::vector<float>> GenerateBenchmarkVectors(int n,
+                                                               int dim) {
+  const char *kind = std::getenv("BENCH_DATA");
+  if (kind != nullptr && std::string(kind) == "ramp") {
+    return DeterministicallyGenerateVectors(n, dim, 10.0);
+  }
+  const int n_centroids = std::max(8, std::min(256, n / 100));
+  std::mt19937 rng(12345);
+  std::normal_distribution<float> centroid_dist(0.0f, 10.0f);
+  std::normal_distribution<float> jitter(0.0f, 1.0f);
+  std::vector<std::vector<float>> centroids(n_centroids,
+                                            std::vector<float>(dim));
+  for (auto &c : centroids) {
+    for (int j = 0; j < dim; ++j) {
+      c[j] = centroid_dist(rng);
+    }
+  }
+  std::vector<std::vector<float>> out(n, std::vector<float>(dim));
+  for (int i = 0; i < n; ++i) {
+    const auto &c = centroids[i % n_centroids];
+    for (int j = 0; j < dim; ++j) {
+      // Within-cluster spread well below between-cluster spread, so there is
+      // real neighbourhood structure for the graph to exploit.
+      out[i][j] = c[j] + jitter(rng);
+    }
+  }
+  return out;
+}
+
 // Single-query latency benchmark for the HNSW search inner loop. Disabled by
 // default; run explicitly with:
 //   .build-release/tests/indexes_test \
@@ -194,6 +250,621 @@ ABSL_NO_THREAD_SAFETY_ANALYSIS {
                "max=%.1f  mean=%.1f  (us/query)\n",
                kDim, kN, kMParam, kEfC, kEfR, kK, lat_us.size(), lat_us.front(),
                pct(50), pct(90), pct(99), lat_us.back(), mean);
+}
+
+// ---------------------------------------------------------------------------
+// Pre-filter vs inline-filter crossover benchmark.
+//
+// Measures single-query latency of the two hybrid-query execution strategies
+// that the query planner chooses between (UsePreFiltering in
+// src/query/planner.cc), as a function of vector dimensionality and numeric
+// filter selectivity:
+//
+//   inline    : HNSW graph traversal with a per-candidate filter callback.
+//               Mirrors query::InlineVectorFilter in src/query/search.cc.
+//   prefilter : resolve the numeric range up front through the entries
+//               fetcher, then exact brute-force distance over only those
+//               keys. Mirrors query::CalcBestMatchingPrefilteredKeys and
+//               EvaluatePrefilteredKeys in src/query/search.cc.
+//
+// Both are deliberately faithful mirrors of helpers that are private to
+// search.cc and so cannot be called from a test. If those helpers change,
+// these mirrors must be updated too.
+//
+// A single cheap numeric range predicate is used on purpose. It is the best
+// case for inline filtering (lowest possible per-candidate evaluation cost)
+// and therefore the worst case for pre-filtering. A crossover measured here
+// is a conservative lower bound: any more expensive predicate (multi-clause,
+// tag, text, negation) moves the crossover further in favour of
+// pre-filtering, because pre-filtering pays that cost once over the small
+// qualified set while inline filtering pays it on every node the graph
+// visits.
+//
+// Selectivity is exact rather than estimated: key i is assigned numeric
+// value i, so the range [0, S-1] matches exactly S of N keys.
+//
+// Recall is reported alongside latency and is load-bearing. Inline HNSW is
+// approximate and can return fewer than k neighbors when the filter is
+// selective, since the graph traversal may never reach enough matching
+// nodes. Such a point is fast but wrong, and comparing its latency to the
+// exact pre-filter path would yield a confidently incorrect crossover. Treat
+// any row with recall well below 1.0 as not a valid comparison.
+//
+// Run:
+//   .build-release/tests/indexes_test \
+//     --gtest_also_run_disabled_tests \
+//     --gtest_filter='*DISABLED_PrefilterCrossoverBenchmark*'
+//
+// Env: BENCH_N BENCH_DIMS BENCH_SELECTIVITIES BENCH_K BENCH_M BENCH_EFC
+//      BENCH_EFR BENCH_QUERIES BENCH_WARMUP
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Mirror of query::InlineVectorFilter (src/query/search.cc). Resolves the
+// HNSW label back to a key and evaluates the full predicate against that one
+// key, exactly as production does per visited candidate.
+class BenchInlineFilter : public hnswlib::BaseFilterFunctor {
+ public:
+  BenchInlineFilter(
+      const query::Predicate *predicate, VectorBase *vector_index,
+      std::shared_ptr<text::TextIndexSchema> text_index_schema,
+      QueryOperations query_operations)
+      : predicate_(predicate),
+        vector_index_(vector_index),
+        text_index_schema_(std::move(text_index_schema)),
+        query_operations_(query_operations) {}
+  ~BenchInlineFilter() override = default;
+
+  bool operator()(hnswlib::labeltype id) override {
+    auto key = vector_index_->GetKeyDuringSearch(id);
+    if (!key.ok()) {
+      return false;
+    }
+    const text::TextIndex *text_index = nullptr;
+    if (text_index_schema_) {
+      text_index = text_index_schema_->GetPerKeyTextIndex(*key, false);
+    }
+    PrefilterEvaluator evaluator(text_index, query_operations_);
+    return evaluator.Evaluate(*predicate_, *key);
+  }
+
+ private:
+  const query::Predicate *predicate_;
+  VectorBase *vector_index_;
+  std::shared_ptr<text::TextIndexSchema> text_index_schema_;
+  QueryOperations query_operations_;
+};
+
+// Kept as a thin alias so the numeric-only crossover benchmark below reads
+// unchanged.
+class BenchInlineNumericFilter : public BenchInlineFilter {
+ public:
+  BenchInlineNumericFilter(const query::Predicate *predicate,
+                           VectorBase *vector_index)
+      : BenchInlineFilter(predicate, vector_index, nullptr,
+                          QueryOperations::kContainsNumeric) {}
+};
+
+std::vector<int> ParseIntList(const char *env_name,
+                              const std::vector<int> &dflt) {
+  const char *raw = std::getenv(env_name);
+  if (raw == nullptr) {
+    return dflt;
+  }
+  std::vector<int> out;
+  for (absl::string_view part : absl::StrSplit(raw, ',', absl::SkipEmpty())) {
+    int v = 0;
+    if (absl::SimpleAtoi(part, &v)) {
+      out.push_back(v);
+    }
+  }
+  return out.empty() ? dflt : out;
+}
+
+std::vector<double> ParseDoubleList(const char *env_name,
+                                    const std::vector<double> &dflt) {
+  const char *raw = std::getenv(env_name);
+  if (raw == nullptr) {
+    return dflt;
+  }
+  std::vector<double> out;
+  for (absl::string_view part : absl::StrSplit(raw, ',', absl::SkipEmpty())) {
+    double v = 0;
+    if (absl::SimpleAtod(part, &v)) {
+      out.push_back(v);
+    }
+  }
+  return out.empty() ? dflt : out;
+}
+
+struct LatencyStats {
+  double p50;
+  double p90;
+  double mean;
+};
+
+LatencyStats Summarize(std::vector<double> samples) {
+  std::sort(samples.begin(), samples.end());
+  auto pct = [&](double p) {
+    return samples[static_cast<size_t>(p / 100.0 * (samples.size() - 1))];
+  };
+  double mean =
+      std::accumulate(samples.begin(), samples.end(), 0.0) / samples.size();
+  return {pct(50), pct(90), mean};
+}
+
+}  // namespace
+
+TEST_F(VectorIndexTest, DISABLED_PrefilterCrossoverBenchmark)
+ABSL_NO_THREAD_SAFETY_ANALYSIS {
+  auto env_int = [](const char *name, int dflt) {
+    const char *v = std::getenv(name);
+    return v ? std::atoi(v) : dflt;
+  };
+  const int kN = env_int("BENCH_N", 50000);
+  const int kK = env_int("BENCH_K", 10);
+  const int kMParam = env_int("BENCH_M", 16);
+  const int kEfC = env_int("BENCH_EFC", 200);
+  const int kEfR = env_int("BENCH_EFR", 128);
+  const int kQueries = env_int("BENCH_QUERIES", 300);
+  const int kWarmup = env_int("BENCH_WARMUP", 30);
+  const std::vector<int> dims = ParseIntList("BENCH_DIMS", {128, 768, 1536});
+  const std::vector<double> selectivities = ParseDoubleList(
+      "BENCH_SELECTIVITIES", {0.001, 0.0025, 0.005, 0.01, 0.02, 0.05, 0.10});
+
+  const std::string attribute_alias = "price";
+  const std::string attribute_id = "price_id";
+
+  std::fprintf(stderr,
+               "\n[PrefilterCrossover] N=%d k=%d M=%d efc=%d efr=%d "
+               "queries=%d\n"
+               "  cheap single numeric range predicate: best case for "
+               "inline, worst case for prefilter\n"
+               "  recall is inline-vs-exact; rows with recall << 1.0 are not "
+               "valid comparisons\n\n",
+               kN, kK, kMParam, kEfC, kEfR, kQueries);
+  std::fprintf(stderr,
+               "%6s %8s %9s %11s %11s %8s %9s %8s\n", "dim", "select",
+               "qualified", "inline_p50", "prefil_p50", "speedup", "winner",
+               "recall");
+
+  for (int dim : dims) {
+    // One index per dim, reused across all selectivity points.
+    auto vector_index =
+        VectorHNSW<float>::Create(
+            CreateHNSWVectorIndexProto(dim, data_model::DISTANCE_METRIC_L2,
+                                       kN + 16, kMParam, kEfC, kEfR),
+            "attribute_identifier_1",
+            data_model::AttributeDataType::ATTRIBUTE_DATA_TYPE_HASH)
+            .value();
+    ASSERT_FALSE(vector_index->GetNormalize())
+        << "L2 index should not normalize; a normalizing metric would need "
+           "the query normalized once up front as "
+           "CalcBestMatchingPrefilteredKeys does";
+
+    data_model::NumericIndex numeric_proto;
+    auto numeric_index = std::make_shared<Numeric>(numeric_proto);
+
+    auto vectors = GenerateBenchmarkVectors(kN, dim);
+    for (int i = 0; i < kN; ++i) {
+      auto key = IndexToKey(i);
+      VMSDK_EXPECT_OK(vector_index->AddRecord(key, VectorToStr(vectors[i])));
+      // Key i gets numeric value i, so [0, S-1] matches exactly S keys.
+      VMSDK_EXPECT_OK(numeric_index->AddRecord(key, std::to_string(i)));
+    }
+
+    for (double selectivity : selectivities) {
+      const int qualified = std::max(1, static_cast<int>(selectivity * kN));
+      query::NumericPredicate predicate(numeric_index.get(), attribute_alias,
+                                        attribute_id, 0.0, true,
+                                        static_cast<double>(qualified - 1),
+                                        true);
+
+      // Confirm the fetcher agrees with the intended selectivity, so a
+      // mis-constructed predicate cannot silently skew the sweep.
+      ASSERT_EQ(numeric_index->Search(predicate, false)->Size(), qualified);
+
+      auto run_inline = [&](int query_idx) {
+        auto filter = std::make_unique<BenchInlineNumericFilter>(
+            &predicate, vector_index.get());
+        return vector_index->Search(VectorToStr(vectors[query_idx]), kK,
+                                    CancelNever(), std::move(filter), kEfR);
+      };
+
+      auto run_prefilter = [&](int query_idx) {
+        absl::string_view query = VectorToStr(vectors[query_idx]);
+        std::priority_queue<std::pair<float, hnswlib::labeltype>> results;
+        // A single numeric predicate needs no dedup (NeedsDeduplication is
+        // false without OR/TAG/negate), so this stays empty, matching
+        // production. AddPrefilteredKey still erases from it on eviction.
+        absl::flat_hash_set<const char *> top_keys;
+        auto fetcher = numeric_index->Search(predicate, false);
+        auto iterator = fetcher->Begin();
+        while (!iterator->Done()) {
+          const auto &key = **iterator;
+          PrefilterEvaluator evaluator(nullptr,
+                                       QueryOperations::kContainsNumeric);
+          if (evaluator.Evaluate(predicate, key)) {
+            vector_index->AddPrefilteredKey(query, kK, key, results, top_keys);
+          }
+          iterator->Next();
+        }
+        return results;
+      };
+
+      for (int i = 0; i < kWarmup; ++i) {
+        int q = (i * 7919) % kN;
+        auto a = run_inline(q);
+        VMSDK_EXPECT_OK(a);
+        run_prefilter(q);
+      }
+
+      std::vector<double> inline_us;
+      std::vector<double> prefilter_us;
+      inline_us.reserve(kQueries);
+      prefilter_us.reserve(kQueries);
+      double recall_sum = 0.0;
+      int recall_points = 0;
+
+      for (int i = 0; i < kQueries; ++i) {
+        const int q = (i * 7919) % kN;
+
+        auto t0 = std::chrono::steady_clock::now();
+        auto inline_res = run_inline(q);
+        auto t1 = std::chrono::steady_clock::now();
+        inline_us.push_back(
+            std::chrono::duration<double, std::micro>(t1 - t0).count());
+        VMSDK_EXPECT_OK(inline_res);
+
+        auto t2 = std::chrono::steady_clock::now();
+        auto prefilter_res = run_prefilter(q);
+        auto t3 = std::chrono::steady_clock::now();
+        prefilter_us.push_back(
+            std::chrono::duration<double, std::micro>(t3 - t2).count());
+
+        // Recall of the approximate inline path against the exact
+        // brute-force pre-filter result.
+        std::set<std::string> exact;
+        while (!prefilter_res.empty()) {
+          auto key = vector_index->GetKeyDuringSearch(prefilter_res.top().second);
+          if (key.ok()) {
+            exact.insert(std::string(key.value()->Str()));
+          }
+          prefilter_res.pop();
+        }
+        if (!exact.empty()) {
+          size_t hits = 0;
+          for (const auto &neighbor : inline_res.value()) {
+            if (exact.count(std::string(neighbor.external_id->Str())) > 0) {
+              ++hits;
+            }
+          }
+          recall_sum += static_cast<double>(hits) / exact.size();
+          ++recall_points;
+        }
+      }
+
+      auto in_stats = Summarize(std::move(inline_us));
+      auto pre_stats = Summarize(std::move(prefilter_us));
+      const double speedup = in_stats.p50 / pre_stats.p50;
+      const double recall =
+          recall_points > 0 ? recall_sum / recall_points : 0.0;
+
+      std::fprintf(stderr, "%6d %7.2f%% %9d %11.1f %11.1f %8.2fx %8s %8.3f\n",
+                   dim, selectivity * 100.0, qualified, in_stats.p50,
+                   pre_stats.p50, speedup,
+                   speedup > 1.0 ? "prefilter" : "inline", recall);
+    }
+    std::fprintf(stderr, "\n");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Filter-cost crossover benchmark: NUMERIC vs TAG vs TEXT.
+//
+// Tests the hypothesis that the crossover point depends on how expensive the
+// non-vector predicate is to evaluate per candidate, and that a cheap numeric
+// range filter is therefore the best case for inline filtering (and the
+// hardest case for raising the pre-filtering threshold).
+//
+// Mechanism under test: inline filtering pays the predicate evaluation on
+// every node the HNSW traversal visits, which is far more than k. Pre-filtering
+// resolves the predicate once through the index structures and then pays only
+// distance math over the qualified set. So as per-candidate evaluation cost
+// grows, inline latency should grow with it while pre-filter latency should be
+// comparatively flat, pushing the crossover to a higher selectivity.
+//
+// Predicates are built with the real FilterParser against a real IndexSchema
+// so field masks, query_operations and predicate shapes match production
+// rather than being hand-constructed.
+//
+// Exact selectivity, one index build per type:
+//   numeric : key i gets value i;      @num:[0 S-1]       matches exactly S.
+//   tag     : key i gets tag "s<L>" for every level L where i < L*N;
+//             @tag:{s<L>}                                 matches exactly L*N.
+//   text    : key i gets the words "s<L>" for every level L where i < L*N;
+//             @txt:s<L>                                   matches exactly L*N.
+// The tag/text marker sets are nested, so low-index keys carry more markers.
+// That makes their stored value longer, which is noted as a caveat: it
+// slightly inflates per-key work for the most selective levels.
+//
+// Fixed at a single dim by design: the numeric sweep above established the
+// crossover is nearly dim-invariant, so dim is not the interesting axis here.
+//
+// Run:
+//   .build-release/tests/indexes_test \
+//     --gtest_also_run_disabled_tests \
+//     --gtest_filter='*DISABLED_FilterCostCrossoverBenchmark*'
+//
+// Env: BENCH_N BENCH_DIM BENCH_SELECTIVITIES BENCH_K BENCH_M BENCH_EFC
+//      BENCH_EFR BENCH_QUERIES BENCH_WARMUP
+// ---------------------------------------------------------------------------
+TEST_F(VectorIndexTest, DISABLED_FilterCostCrossoverBenchmark)
+ABSL_NO_THREAD_SAFETY_ANALYSIS {
+  auto env_int = [](const char *name, int dflt) {
+    const char *v = std::getenv(name);
+    return v ? std::atoi(v) : dflt;
+  };
+  const int kN = env_int("BENCH_N", 20000);
+  const int kDim = env_int("BENCH_DIM", 768);
+  const int kK = env_int("BENCH_K", 10);
+  const int kMParam = env_int("BENCH_M", 16);
+  const int kEfC = env_int("BENCH_EFC", 200);
+  const int kEfR = env_int("BENCH_EFR", 128);
+  const int kQueries = env_int("BENCH_QUERIES", 100);
+  const int kWarmup = env_int("BENCH_WARMUP", 10);
+  const std::vector<double> selectivities =
+      ParseDoubleList("BENCH_SELECTIVITIES",
+                      {0.01, 0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.70});
+
+  // Level label used in tag/text marker words, e.g. selectivity 0.05 -> "s500"
+  // (basis points), so the term is unique per level.
+  auto level_label = [](double selectivity) {
+    return absl::StrCat("s", static_cast<int>(std::llround(selectivity * 10000)));
+  };
+
+  auto index_schema = CreateIndexSchema("crossover_schema").value();
+  EXPECT_CALL(*index_schema, GetIdentifier(::testing::_))
+      .Times(::testing::AnyNumber());
+
+  // --- numeric index: key i -> value i ---
+  data_model::NumericIndex numeric_proto;
+  auto numeric_index = std::make_shared<Numeric>(numeric_proto);
+  VMSDK_EXPECT_OK(index_schema->AddIndex("num", "num", numeric_index));
+
+  // --- tag index: nested level markers ---
+  auto tag_proto = CreateTagIndexProto(",", /*case_sensitive=*/true);
+  auto tag_index = std::make_shared<Tag>(tag_proto);
+  VMSDK_EXPECT_OK(index_schema->AddIndex("tg", "tg", tag_index));
+
+  // --- text index: nested level markers as words ---
+  index_schema->CreateTextIndexSchema();
+  auto text_index_schema = index_schema->GetTextIndexSchema();
+  auto text_proto = CreateTextIndexProto(/*with_suffix_trie=*/false,
+                                         /*no_stem=*/true, /*weight=*/1.0);
+  auto text_index = std::make_shared<Text>(text_proto, text_index_schema);
+  VMSDK_EXPECT_OK(index_schema->AddIndex("txt", "txt", text_index));
+
+  auto vector_index =
+      VectorHNSW<float>::Create(
+          CreateHNSWVectorIndexProto(kDim, data_model::DISTANCE_METRIC_L2,
+                                     kN + 16, kMParam, kEfC, kEfR),
+          "vec", data_model::AttributeDataType::ATTRIBUTE_DATA_TYPE_HASH)
+          .value();
+
+  auto vectors = GenerateBenchmarkVectors(kN, kDim);
+  for (int i = 0; i < kN; ++i) {
+    auto key = IndexToKey(i);
+    VMSDK_EXPECT_OK(vector_index->AddRecord(key, VectorToStr(vectors[i])));
+    VMSDK_EXPECT_OK(numeric_index->AddRecord(key, std::to_string(i)));
+
+    // Every level whose qualified prefix includes key i.
+    std::vector<std::string> markers;
+    for (double selectivity : selectivities) {
+      if (i < std::max(1, static_cast<int>(selectivity * kN))) {
+        markers.push_back(level_label(selectivity));
+      }
+    }
+    // Tag/Text indexes reject empty values, so give non-matching keys a
+    // marker that no query ever asks for.
+    if (markers.empty()) {
+      markers.push_back("none");
+    }
+    VMSDK_EXPECT_OK(tag_index->AddRecord(key, absl::StrJoin(markers, ",")));
+    VMSDK_EXPECT_OK(text_index->AddRecord(key, absl::StrJoin(markers, " ")));
+    text_index_schema->CommitKeyData(key);
+  }
+
+  std::fprintf(stderr,
+               "\n[FilterCostCrossover] N=%d dim=%d k=%d M=%d efc=%d efr=%d "
+               "queries=%d\n"
+               "  tests whether a more expensive non-vector predicate moves "
+               "the crossover toward prefilter\n"
+               "  recall is inline-vs-exact; rows with recall << 1.0 are not "
+               "valid comparisons\n\n",
+               kN, kDim, kK, kMParam, kEfC, kEfR, kQueries);
+  std::fprintf(stderr, "%8s %8s %9s %11s %11s %8s %9s %8s\n", "filter",
+               "select", "qualified", "inline_p50", "prefil_p50", "speedup",
+               "winner", "recall");
+
+  struct FilterCase {
+    const char *name;
+    // Builds the FT filter expression for a given selectivity level.
+    std::function<std::string(double)> filter_expr;
+    bool needs_dedup;  // mirrors query::NeedsDeduplication
+  };
+  const std::vector<FilterCase> filter_cases = {
+      {"numeric",
+       [&](double s) {
+         const int qualified = std::max(1, static_cast<int>(s * kN));
+         return absl::StrCat("@num:[0 ", qualified - 1, "]");
+       },
+       /*needs_dedup=*/false},
+      {"tag",
+       [&](double s) { return absl::StrCat("@tg:{", level_label(s), "}"); },
+       /*needs_dedup=*/true},
+      {"text",
+       [&](double s) { return absl::StrCat("@txt:", level_label(s)); },
+       /*needs_dedup=*/false},
+  };
+
+  for (const auto &filter_case : filter_cases) {
+    for (double selectivity : selectivities) {
+      const int qualified = std::max(1, static_cast<int>(selectivity * kN));
+      const std::string expr = filter_case.filter_expr(selectivity);
+
+      TextParsingOptions text_options{};
+      FilterParser parser(*index_schema, expr, text_options);
+      auto parsed = parser.Parse();
+      ASSERT_TRUE(parsed.ok()) << expr << ": " << parsed.status().message();
+      const query::Predicate *predicate = parsed.value().root_predicate.get();
+      const QueryOperations query_operations = parsed.value().query_operations;
+      const bool is_text = predicate->GetType() == query::PredicateType::kText;
+
+      // Opens a fresh scan over the keys qualifying the predicate, mirroring
+      // the entries fetcher that EvaluateFilterAsPrimary would build.
+      struct Scan {
+        std::unique_ptr<indexes::EntriesFetcherBase> fetcher;
+        std::unique_ptr<indexes::EntriesFetcherIteratorBase> iter;
+      };
+      auto open_scan = [&]() -> Scan {
+        Scan scan;
+        if (const auto *numeric_predicate =
+                dynamic_cast<const query::NumericPredicate *>(predicate)) {
+          scan.fetcher = numeric_index->Search(*numeric_predicate, false);
+          scan.iter = scan.fetcher->Begin();
+        } else if (const auto *tag_predicate =
+                       dynamic_cast<const query::TagPredicate *>(predicate)) {
+          scan.fetcher = tag_index->Search(*tag_predicate, false);
+          scan.iter = scan.fetcher->Begin();
+        } else {
+          const auto *text_predicate =
+              dynamic_cast<const query::TextPredicate *>(predicate);
+          CHECK(text_predicate != nullptr);
+          scan.iter = std::make_unique<text::TextFetcher>(
+              text_predicate->BuildTextIterator(
+                  text_index_schema->GetTextIndex(),
+                  text_predicate->GetFieldMask(), false));
+        }
+        return scan;
+      };
+
+      // Confirm the filter really selects the intended number of keys, so a
+      // mis-built expression cannot silently skew the sweep.
+      {
+        auto scan = open_scan();
+        int counted = 0;
+        while (!scan.iter->Done()) {
+          ++counted;
+          scan.iter->Next();
+        }
+        ASSERT_EQ(counted, qualified)
+            << expr << " selected " << counted << " keys, expected "
+            << qualified;
+      }
+
+      auto run_inline = [&](int query_idx) {
+        auto filter = std::make_unique<BenchInlineFilter>(
+            predicate, vector_index.get(),
+            is_text ? text_index_schema : nullptr, query_operations);
+        return vector_index->Search(VectorToStr(vectors[query_idx]), kK,
+                                    CancelNever(), std::move(filter), kEfR);
+      };
+
+      // Mirror of CalcBestMatchingPrefilteredKeys + EvaluatePrefilteredKeys.
+      auto run_prefilter = [&](int query_idx) {
+        absl::string_view query = VectorToStr(vectors[query_idx]);
+        std::priority_queue<std::pair<float, hnswlib::labeltype>> results;
+        absl::flat_hash_set<const char *> top_keys;
+        auto scan = open_scan();
+        while (!scan.iter->Done()) {
+          const auto &key = **scan.iter;
+          if (filter_case.needs_dedup &&
+              top_keys.contains(key->Str().data())) {
+            scan.iter->Next();
+            continue;
+          }
+          const text::TextIndex *per_key_text =
+              is_text ? text_index_schema->GetPerKeyTextIndex(key, false)
+                      : nullptr;
+          PrefilterEvaluator evaluator(per_key_text, query_operations);
+          if (evaluator.Evaluate(*predicate, key)) {
+            if (vector_index->AddPrefilteredKey(query, kK, key, results,
+                                                top_keys) &&
+                filter_case.needs_dedup) {
+              top_keys.insert(key->Str().data());
+            }
+          }
+          scan.iter->Next();
+        }
+        return results;
+      };
+
+      for (int i = 0; i < kWarmup; ++i) {
+        const int q = (i * 7919) % kN;
+        auto a = run_inline(q);
+        VMSDK_EXPECT_OK(a);
+        run_prefilter(q);
+      }
+
+      std::vector<double> inline_us;
+      std::vector<double> prefilter_us;
+      inline_us.reserve(kQueries);
+      prefilter_us.reserve(kQueries);
+      double recall_sum = 0.0;
+      int recall_points = 0;
+
+      for (int i = 0; i < kQueries; ++i) {
+        const int q = (i * 7919) % kN;
+
+        auto t0 = std::chrono::steady_clock::now();
+        auto inline_res = run_inline(q);
+        auto t1 = std::chrono::steady_clock::now();
+        inline_us.push_back(
+            std::chrono::duration<double, std::micro>(t1 - t0).count());
+        VMSDK_EXPECT_OK(inline_res);
+
+        auto t2 = std::chrono::steady_clock::now();
+        auto prefilter_res = run_prefilter(q);
+        auto t3 = std::chrono::steady_clock::now();
+        prefilter_us.push_back(
+            std::chrono::duration<double, std::micro>(t3 - t2).count());
+
+        std::set<std::string> exact;
+        while (!prefilter_res.empty()) {
+          auto key =
+              vector_index->GetKeyDuringSearch(prefilter_res.top().second);
+          if (key.ok()) {
+            exact.insert(std::string(key.value()->Str()));
+          }
+          prefilter_res.pop();
+        }
+        if (!exact.empty()) {
+          size_t hits = 0;
+          for (const auto &neighbor : inline_res.value()) {
+            if (exact.count(std::string(neighbor.external_id->Str())) > 0) {
+              ++hits;
+            }
+          }
+          recall_sum += static_cast<double>(hits) / exact.size();
+          ++recall_points;
+        }
+      }
+
+      auto in_stats = Summarize(std::move(inline_us));
+      auto pre_stats = Summarize(std::move(prefilter_us));
+      const double speedup = in_stats.p50 / pre_stats.p50;
+      const double recall =
+          recall_points > 0 ? recall_sum / recall_points : 0.0;
+
+      std::fprintf(stderr, "%8s %7.2f%% %9d %11.1f %11.1f %8.2fx %9s %8.3f\n",
+                   filter_case.name, selectivity * 100.0, qualified,
+                   in_stats.p50, pre_stats.p50, speedup,
+                   speedup > 1.0 ? "prefilter" : "inline", recall);
+    }
+    std::fprintf(stderr, "\n");
+  }
 }
 
 void VerifyResult(const absl::StatusOr<indexes::RecordResult> &res,
