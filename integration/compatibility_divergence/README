@@ -1,0 +1,32 @@
+This directory holds captured RediSearch answers for FT.SEARCH behaviors that
+valkey-search currently answers *differently*. It is a demonstration of known
+divergences, not a passing compatibility suite: every test in
+integration/compatibility_divergence_test.py is marked xfail(strict=True), so CI
+stays green while a divergence exists and turns red as soon as one is fixed
+without its marker being removed.
+
+To regenerate the answer file, cd to integration/ and run:
+
+    pytest compatibility_divergence/generate_divergence.py
+
+Docker is required. Like the generators in integration/compatibility/, this one
+spins up redis/redis-stack-server on port 6380 to capture reference answers, and
+the docker handling is sometimes flaky -- the container may need to be killed
+manually between runs. The pickle records which search module version answered
+(e.g. "search 21020"), so the expectations always name the build they came from.
+
+The pickle also stores a SHA256 of generate_divergence.py alone, and the replay
+test verifies it on load. That is narrower than integration/compatibility/, whose
+hash covers every .py file in the directory: nothing else here feeds the answers,
+and each record carries the setup commands that produced it, so there is no
+shared dataset module to guard. Set SKIP_DIVERGENCE_HASH_CHECK=1 to bypass the
+check while iterating locally.
+
+Why this is separate from integration/compatibility/ rather than a few more
+cases in generate.py: that suite's comparator normalizes away exactly the signals
+these bugs live in. unpack_result re-sorts *both* engines' rows by the sort field
+before comparing, so an ordering divergence disappears; unpack_search_result
+drops the sort-key element, so WITHSORTKEYS values are never compared; and its
+2-element stride cannot parse a NOCONTENT reply at all. Cases added there would
+pass against every divergence captured here, so the replay side compares replies
+raw -- element for element, order and arity included.
