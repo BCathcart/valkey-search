@@ -1874,51 +1874,36 @@ TEST_F(ScoreTextQueryTestBase, NaNScoreIsClampedBeforeReachingNeighbor) {
 // shard-side extra-step path (ScoreTextQuery) — both walk the same ScoreNode.
 // Pinned at a real NON-ZERO value (text + tag terms) so a magnitude divergence
 // in either path is caught; the numeric clause adds 0 and must not perturb it.
+// Both LockPolicy modes must land on that same value.
 TEST_F(ScoreTextQueryTestBase, RecomputePathMatchesExtraStepAtNonZero) {
   auto schema = BuildTextTagSchema({
       {"d1", "hello world", "red"},
       {"d2", "hello there", "blue"},
   });
   const std::string filter = "@text:hello @color:{red} @rating:[0 100]";
+  auto key = StringInternStore::Intern("d1");
 
   // Extra-step path: Score() takes the reader lock internally.
   auto extra_step = Score(*schema, filter, "d1");
   ASSERT_TRUE(extra_step.has_value());
   EXPECT_GT(*extra_step, 0.0f);
 
-  // Recompute path: the default kAcquireLock constructor takes the reader lock
-  // itself, so construct WITHOUT it held. Score() takes no time-sliced lock.
-  auto recomputed =
-      MakeScorer(*schema, filter)->Score(StringInternStore::Intern("d1"));
-  ASSERT_TRUE(recomputed.has_value());
-  EXPECT_FLOAT_EQ(*recomputed, *extra_step);
-}
+  // kAcquireLock takes the reader lock in the constructor, so construct WITHOUT
+  // it held.
+  auto acquired = MakeScorer(*schema, filter)->Score(key);
+  ASSERT_TRUE(acquired.has_value());
+  EXPECT_FLOAT_EQ(*acquired, *extra_step);
 
-// Search() pre-builds the recompute scorer on the background thread while the
-// search's reader lock is still held (LockPolicy::kLockAlreadyHeld). Pin that
-// construction mode: built under a caller-held reader lock, then scored after
-// the lock is released, it must land on the same scale as the extra-step path.
-TEST_F(ScoreTextQueryTestBase, RecomputeScorerConstructibleUnderHeldLock) {
-  auto schema = BuildTextTagSchema({
-      {"d1", "hello world", "red"},
-      {"d2", "hello there", "blue"},
-  });
-  const std::string filter = "@text:hello @color:{red}";
-
-  auto extra_step = Score(*schema, filter, "d1");
-  ASSERT_TRUE(extra_step.has_value());
-  EXPECT_GT(*extra_step, 0.0f);
-
-  ScoredFilter document_scorer;
+  // kLockAlreadyHeld is what Search() uses: built on the background thread
+  // under the search's reader lock, then scored once the lock is gone.
+  ScoredFilter held;
   {
-    // Simulate the Search() construction site: the reader lock is already
-    // held, so the constructor must not try to acquire it again.
     vmsdk::ReaderMutexLock lock(&schema->GetTimeSlicedMutex());
-    document_scorer =
+    held =
         MakeScorer(*schema, filter,
                    query::SingleDocumentScorer::LockPolicy::kLockAlreadyHeld);
   }
-  auto recomputed = document_scorer->Score(StringInternStore::Intern("d1"));
+  auto recomputed = held->Score(key);
   ASSERT_TRUE(recomputed.has_value());
   EXPECT_FLOAT_EQ(*recomputed, *extra_step);
 }
@@ -2008,29 +1993,23 @@ TEST_F(ScoreTextQueryTestBase, ScoreIsSafeAgainstCommitsOnTheSameWord) {
   churn.join();
 }
 
-// The pre-build gate must stay equivalent to GetContentProcessing() !=
-// kNoContent. No subclass overrides it: every operation that fetches content on
-// the main thread does so with no_content == false.
+// NoProcessingRequired() gates both the content fetch and the recompute scorer
+// pre-build, and GetContentProcessing() routes on it.
 // Fixture required: UnitTestSearchParameters -> cancel::Make ->
 // ValkeyModule_Milliseconds needs the mock module alive.
-class RecomputeScorerGateTest : public vmsdk::ValkeyTest {};
+class NoProcessingRequiredTest : public vmsdk::ValkeyTest {};
 
-TEST_F(RecomputeScorerGateTest, DefaultsToContentFetchingQueries) {
+TEST_F(NoProcessingRequiredTest, OnlyNoContentWithoutSortBySkipsProcessing) {
   UnitTestSearchParameters params;
-  params.no_content = false;
   EXPECT_FALSE(params.NoProcessingRequired());
   EXPECT_NE(params.GetContentProcessing(), query::kNoContent);
 
   params.no_content = true;
   EXPECT_TRUE(params.NoProcessingRequired());
   EXPECT_EQ(params.GetContentProcessing(), query::kNoContent);
-}
 
-// NOCONTENT SORTBY reads the sort field out of the key, so it fetches content
-// and must get a scorer even though the reply carries no field values.
-TEST_F(RecomputeScorerGateTest, NoContentWithSortByStillFetches) {
-  UnitTestSearchParameters params;
-  params.no_content = true;
+  // SORTBY reads the sort field out of the key, so FT.SEARCH still fetches
+  // content even though the reply carries no field values.
   params.sortby_parameter = query::SortByParameter{.field = "rank"};
   EXPECT_FALSE(params.NoProcessingRequired());
   EXPECT_NE(params.GetContentProcessing(), query::kNoContent);

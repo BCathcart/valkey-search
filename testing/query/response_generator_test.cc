@@ -321,7 +321,10 @@ void RunSingleNeighborRecompute(
     query::PredicateType leaf_type, float weight, float initial_neighbor_score,
     const std::optional<std::string> &vector_identifier,
     std::vector<indexes::Neighbor> &neighbors, bool build_scorer = false) {
-  parameters.index_schema = CreateIndexSchema("index").value();
+  // Named after the key so one test can call this more than once: a schema name
+  // may only be registered once per DB.
+  parameters.index_schema =
+      CreateIndexSchema(absl::StrCat("index:", key)).value();
   parameters.filter_parse_results.filter_identifiers = {"id2"};
 
   auto predicate = std::make_unique<MockPredicate>(leaf_type);
@@ -367,69 +370,40 @@ void RunSingleNeighborRecompute(
 }
 }  // namespace
 
-// A neighbor that did NOT mutate (db_seq == sequence_number) keeps its carried
-// score untouched — VerifyFilter returns on the fast path with no recomputed
-// score. (The magnitude of a recomputed numeric/tag score is covered by the
-// query-level TagScoreTest in search_test.cc, which uses real indexes.)
-TEST_F(ResponseGeneratorTest, NoRecomputeWhenNeighborNotMutated) {
-  ValkeyModuleCtx fake_ctx;
+// VerifyFilter only recomputes when the neighbor mutated AND Search() left a
+// pre-built scorer behind. A numeric leaf is a filter rather than a ranker, so
+// a recompute lands on 0 — the carried 7.0 surviving means none happened.
+TEST_F(ResponseGeneratorTest, RecomputeNeedsMutationAndPreBuiltScorer) {
   EXPECT_CALL(*kMockValkeyModule, GetExpire(testing::_))
       .WillRepeatedly(testing::Return(VALKEYMODULE_NO_EXPIRE));
 
-  UnitTestSearchParameters parameters;
-  MockAttributeDataType data_type;
-  std::vector<indexes::Neighbor> neighbors;
-  RunSingleNeighborRecompute(&fake_ctx, parameters, data_type, "k1",
-                             /*mutated=*/false, query::PredicateType::kNumeric,
-                             /*weight=*/3.0f, /*initial_neighbor_score=*/7.0f,
-                             /*vector_identifier=*/std::nullopt, neighbors);
+  struct Case {
+    absl::string_view key;
+    bool mutated;
+    bool build_scorer;
+    float expected_score;
+  };
+  // Fast path, nothing to do; unmutated so the scorer goes unused; recomputed;
+  // no scorer so the carried score is kept.
+  for (const auto &c :
+       {Case{"k1", false, false, 7.0f}, Case{"k2", false, true, 7.0f},
+        Case{"k3", true, true, 0.0f}, Case{"k4", true, false, 7.0f}}) {
+    ValkeyModuleCtx fake_ctx;
+    UnitTestSearchParameters parameters;
+    MockAttributeDataType data_type;
+    std::vector<indexes::Neighbor> neighbors;
+    RunSingleNeighborRecompute(&fake_ctx, parameters, data_type, c.key,
+                               c.mutated, query::PredicateType::kNumeric,
+                               /*weight=*/3.0f,
+                               /*initial_neighbor_score=*/7.0f,
+                               /*vector_identifier=*/std::nullopt, neighbors,
+                               c.build_scorer);
 
-  ASSERT_EQ(neighbors.size(), 1);
-  // Untouched: still the shard-side score. A recompute would have replaced it
-  // with 0, since a numeric leaf is a filter rather than a ranker.
-  EXPECT_FLOAT_EQ(neighbors[0].score, 7.0f);
-}
-
-// A mutated neighbor is recomputed through the scorer Search() pre-built on the
-// owning SearchParameters.
-TEST_F(ResponseGeneratorTest, RecomputeUsesPreBuiltScorer) {
-  ValkeyModuleCtx fake_ctx;
-  EXPECT_CALL(*kMockValkeyModule, GetExpire(testing::_))
-      .WillRepeatedly(testing::Return(VALKEYMODULE_NO_EXPIRE));
-
-  UnitTestSearchParameters parameters;
-  MockAttributeDataType data_type;
-  std::vector<indexes::Neighbor> neighbors;
-
-  RunSingleNeighborRecompute(&fake_ctx, parameters, data_type, "k1",
-                             /*mutated=*/true, query::PredicateType::kNumeric,
-                             /*weight=*/3.0f, /*initial_neighbor_score=*/7.0f,
-                             /*vector_identifier=*/std::nullopt, neighbors,
-                             /*build_scorer=*/true);
-
-  ASSERT_EQ(neighbors.size(), 1);
-  // The scorer ran: a numeric leaf is a filter, not a ranker, so it recomputes
-  // to 0 — the point is that the stale carried 7.0 was replaced.
-  EXPECT_FLOAT_EQ(neighbors[0].score, 0.0f);
-}
-
-// With no scorer anywhere, a mutated neighbor is retained with its carried
-// score rather than dropped or zeroed.
-TEST_F(ResponseGeneratorTest, RecomputeKeepsCarriedScoreWithoutScorer) {
-  ValkeyModuleCtx fake_ctx;
-  EXPECT_CALL(*kMockValkeyModule, GetExpire(testing::_))
-      .WillRepeatedly(testing::Return(VALKEYMODULE_NO_EXPIRE));
-
-  UnitTestSearchParameters parameters;
-  MockAttributeDataType data_type;
-  std::vector<indexes::Neighbor> neighbors;
-  RunSingleNeighborRecompute(&fake_ctx, parameters, data_type, "k1",
-                             /*mutated=*/true, query::PredicateType::kNumeric,
-                             /*weight=*/3.0f, /*initial_neighbor_score=*/7.0f,
-                             /*vector_identifier=*/std::nullopt, neighbors);
-
-  ASSERT_EQ(neighbors.size(), 1);
-  EXPECT_FLOAT_EQ(neighbors[0].score, 7.0f);
+    ASSERT_EQ(neighbors.size(), 1);
+    EXPECT_FLOAT_EQ(neighbors[0].score, c.expected_score)
+        << "key=" << c.key << " mutated=" << c.mutated
+        << " build_scorer=" << c.build_scorer;
+  }
 }
 
 // A vector (KNN) query is never rescored — Neighbor.score there is a distance

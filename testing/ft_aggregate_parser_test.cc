@@ -369,8 +369,6 @@ TEST_F(AggregateTest, EmptyApplyAndFilterExpressionsAreRejected) {
   }
 }
 
-// A no_content FT.AGGREGATE skips the main-thread fetch (see
-// ProcessNeighborsForProcessing), so it must not claim one here.
 TEST_F(AggregateTest, AddScoresFlagParses) {
   for (const bool given : {true, false}) {
     auto argv = vmsdk::ToValkeyStringVector(given ? "ADDSCORES LOAD 1 @n1"
@@ -387,9 +385,13 @@ TEST_F(AggregateTest, AddScoresFlagParses) {
   }
 }
 
+// Unlike FT.SEARCH, a no_content FT.AGGREGATE fetches nothing on the main
+// thread even with SORTBY, since SORTBY orders a column already in the record.
 TEST_F(AggregateTest, NoContentDoesNotFetchContentOnMainThread) {
   AggregateParameters params(0);
   params.no_content = true;
+  EXPECT_TRUE(params.NoProcessingRequired());
+  params.sortby_parameter = query::SortByParameter{.field = "n1"};
   EXPECT_TRUE(params.NoProcessingRequired());
   params.no_content = false;
   EXPECT_FALSE(params.NoProcessingRequired());

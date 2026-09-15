@@ -80,8 +80,7 @@ struct AggregateParameters : public expr::Expression::CompileContext,
   bool loadall_{false};
   std::vector<LoadField> loads_;
   bool load_key{false};
-  // ADDSCORES: expose the relevance score as pipeline field __score
-  // (see ProcessNeighborsForProcessing / CreateRecordsFromNeighbors).
+  // ADDSCORES: expose the relevance score as pipeline field __score.
   bool addscores_{false};
   std::vector<std::unique_ptr<Stage>> stages_;
 
