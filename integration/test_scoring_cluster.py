@@ -12,8 +12,6 @@ inflated and it leads every "hello" query — unlike standalone, where doc:5 lea
 Topology: ValkeySearchClusterTestCase default = 3 shards, 0 replicas.
 """
 
-import threading
-
 import pytest
 from valkey.client import Valkey
 from valkey.cluster import ValkeyCluster
@@ -23,7 +21,7 @@ from valkey_search_test_case import (
 )
 from valkeytestframework.conftest import resource_port_tracker
 from valkeytestframework.util import waiters
-from utils import IndexingTestHelper
+from utils import IndexingTestHelper, run_in_thread
 
 from test_scoring import (
     IDX_MAIN, IDX_DOC_SCORE, TEXT_DOCS, MULTI_FIELD_DOCS, SCORE_ABS_TOL, _vec,
@@ -73,21 +71,27 @@ VECTOR_NUM_DOCS = {
 }
 
 
-def _pairs(res):
-    """Parses a WITHSCORES reply into ordered (key, score) tuples."""
+def _pairs(res, no_content=False):
+    """Parses a WITHSCORES reply into ordered (key, score) tuples.
+
+    After the count, each result is a triple: key, score, attrs. A NOCONTENT
+    reply omits the attrs element."""
     out = []
-    # After the count, each result is a triple: key, score, attrs.
-    for i in range(1, len(res), 3):
+    stride = 2 if no_content else 3
+    for i in range(1, len(res), stride):
         key = res[i].decode() if isinstance(res[i], bytes) else res[i]
         out.append((key, float(res[i + 1])))
     return out
 
 
-def _agg_scores(res):
-    """Parses the __score values out of an ADDSCORES reply, in reply order.
-    Each row is a flat field/value list."""
-    return [float(row[i + 1]) for row in res[1:]
-            for i in range(0, len(row), 2) if row[i] == b"__score"]
+def _agg_pairs(res):
+    """Parses an ADDSCORES reply into ordered (key, score) tuples. Each row is a
+    flat field/value list, so the query has to LOAD __key alongside ADDSCORES."""
+    out = []
+    for row in res[1:]:
+        fields = {row[i]: row[i + 1] for i in range(0, len(row), 2)}
+        out.append((fields[b"__key"].decode(), float(fields[b"__score"])))
+    return out
 
 
 def _load(test, index, docs):
@@ -302,10 +306,12 @@ class TestScoringCluster(ValkeySearchClusterTestCase):
 IDX_NAME = "idxRecompute"
 IDX = [
     "FT.CREATE", IDX_NAME, "ON", "HASH", "PREFIX", "1", "r:",
-    "SCHEMA",  "t", "TAG",
+    "SCHEMA",  "t", "TAG", "body", "TEXT", "NOSTEM",
 ]
 
-DOCS = {f"r:{i}": {"n": str(i), "t": "red"} for i in range(12)}
+DOCS = {f"r:{i}": {"n": str(i), "t": "red", "body": "hello"} for i in range(12)}
+
+BOOSTED_BODY = "hello hello hello"
 
 class TestScoringRecomputeCluster(ValkeySearchClusterTestCaseDebugMode):
     """
@@ -335,33 +341,61 @@ class TestScoringRecomputeCluster(ValkeySearchClusterTestCaseDebugMode):
         The mutation touches `n`, not the queried `t`: revalidation must still
         MATCH, otherwise VerifyFilter returns on the non-match branch and never
         reaches the recompute."""
+
+        # Run the command while blocked
         coordinator.execute_command("ft._debug PAUSEPOINT SET block_mutation_queue")
-        writer = threading.Thread(
-            target=lambda: self.new_client_for_primary(0).hset(key, "n", "999")
+        writer, _, writer_err = run_in_thread(
+            lambda: self.new_client_for_primary(0).hset(key, "body", BOOSTED_BODY)
         )
-        writer.start()
-        try:
-            waiters.wait_for_true(
-                lambda: int(
-                    coordinator.execute_command(
-                        "ft._debug PAUSEPOINT test block_mutation_queue"
-                    )
+        waiters.wait_for_true(
+            lambda: int(
+                coordinator.execute_command(
+                    "ft._debug PAUSEPOINT test block_mutation_queue"
                 )
-                > 0
             )
-            return coordinator.execute_command(*cmd)
-        finally:
-            coordinator.execute_command(
-                "ft._debug PAUSEPOINT RESET block_mutation_queue"
-            )
-            writer.join()
+            > 0
+        )
+        runner, res, err = run_in_thread(
+            lambda: self.new_client_for_primary(0).execute_command(*cmd)
+        )
+
+        # A no_content query never reaches the contention check, so it just
+        # runs to completion; either outcome means it is safe to release.
+        waiters.wait_for_true(
+            lambda: not runner.is_alive()
+            or self._counter(coordinator, "search_text_query_blocked_count")
+            > 1
+        )
+
+        # Unblock and reset the index state
+        coordinator.execute_command(
+            "ft._debug PAUSEPOINT RESET block_mutation_queue"
+        )
+        writer.join()
+        runner.join()
+        assert writer_err[0] is None
+        assert err[0] is None
+        self.new_client_for_primary(0).hset(key, "body", DOCS[key]["body"])
+        IndexingTestHelper.wait_for_indexing_complete_on_node(coordinator, IDX_NAME)
+    
+        return res[0]
 
     def test_search_recomputes_on_local_responder(self):
         coordinator: Valkey = self.new_client_for_primary(0)
         key = self._load_local_key(coordinator)
         assert self._counter(coordinator, "search_predicate_revalidation") == 0
 
-        # Basic search on Tag needs to revalidate predicate on main thread
+        # Basic search without key in flight doesn't revalidate
+        res = coordinator.execute_command(
+            "FT.SEARCH", IDX_NAME, "@t:{red}", "LIMIT", "0", "100",
+            "WITHSCORES",
+        )
+        assert self._counter(coordinator, "search_predicate_revalidation") == 0
+        scores0 = [s for _, s in _pairs(res)]
+        assert len(scores0) == len(DOCS)
+        assert all(s > 0 for s in scores0)
+
+        # Basic search needs to revalidate predicate on main thread
         res = self._run_with_mutation_in_flight(
             coordinator, key,
             "FT.SEARCH", IDX_NAME, "@t:{red}", "LIMIT", "0", "100",
@@ -369,8 +403,10 @@ class TestScoringRecomputeCluster(ValkeySearchClusterTestCaseDebugMode):
         )
         assert self._counter(coordinator, "search_predicate_revalidation") == 1
         assert self._counter(coordinator, "search_recompute_scorer_missing") == 0
-        scores1 = [s for _, s in _pairs(res)]
-        assert scores1 and all(s > 0 for s in scores1)
+        pairs = _pairs(res)
+        assert sorted(k for k, _ in pairs) == sorted(DOCS)
+        scores1 = [s for _, s in pairs]
+        assert all(s > 0 for s in scores1)
 
         # LOAD __key doesn't resolve to a record attribute, so no content from
         # updated key is fetched and therefore no revalidation is needed.
@@ -379,23 +415,54 @@ class TestScoringRecomputeCluster(ValkeySearchClusterTestCaseDebugMode):
             "FT.AGGREGATE", IDX_NAME, "@t:{red}", "ADDSCORES",
             "LOAD", "1", "__key",
         )
-
         assert self._counter(coordinator, "search_predicate_revalidation") == 1
         assert self._counter(coordinator, "search_recompute_scorer_missing") == 0
-        assert sorted(row[1].decode() for row in res[1:]) == sorted(DOCS)
-        scores2 = _agg_scores(res)
+        pairs = _agg_pairs(res)
+        assert sorted(k for k, _ in pairs) == sorted(DOCS)
+        scores2 = [s for _, s in pairs]
         assert scores2 != scores1
+        # NOTE: FT.AGGREGATE results aren't implicitly sorted by score
+        assert sorted(scores2, reverse=True) == scores0
 
         # A LOAD that actually fetches content triggers revalidation and
         # score recompute
         res = self._run_with_mutation_in_flight(
             coordinator, key,
             "FT.AGGREGATE", IDX_NAME, "@t:{red}", "ADDSCORES",
-            "LOAD", "1", "@n",
+            "LOAD", "2", "__key", "@t",
         )
 
         assert self._counter(coordinator, "search_predicate_revalidation") == 2
         assert self._counter(coordinator, "search_recompute_scorer_missing") == 0
-        assert sorted(row[1].decode() for row in res[1:]) == sorted(DOCS)
-        scores3 = _agg_scores(res)
-        assert scores3 == scores1
+        pairs = _agg_pairs(res)
+        assert sorted(k for k, _ in pairs) == sorted(DOCS)
+        scores3 = [s for _, s in pairs]
+        assert sorted(scores3, reverse=True) == scores1
+
+        # SORTBY makes FT.SEARCH fetch content even with NOCONTENT, so the score
+        # is still recomputed
+        res = self._run_with_mutation_in_flight(
+            coordinator, key,
+            "FT.SEARCH", IDX_NAME, "@t:{red}", "LIMIT", "0", "100",
+            "NOCONTENT", "WITHSCORES", "SORTBY", "t",
+        )
+        assert self._counter(coordinator, "search_predicate_revalidation") == 3
+        assert self._counter(coordinator, "search_recompute_scorer_missing") == 0
+        pairs = _pairs(res, no_content=True)
+        assert sorted(k for k, _ in pairs) == sorted(DOCS)
+        scores4 = [s for _, s in pairs]
+        assert sorted(scores4, reverse=True) == scores1
+
+        # Without SORTBY nothing needs the key's content, so the reply is built on
+        # the background thread with the score the search computed
+        res = self._run_with_mutation_in_flight(
+            coordinator, key,
+            "FT.SEARCH", IDX_NAME, "@t:{red}", "LIMIT", "0", "100",
+            "NOCONTENT", "WITHSCORES",
+        )
+        assert self._counter(coordinator, "search_predicate_revalidation") == 3
+        assert self._counter(coordinator, "search_recompute_scorer_missing") == 0
+        pairs = _pairs(res, no_content=True)
+        assert sorted(k for k, _ in pairs) == sorted(DOCS)
+        scores5 = [s for _, s in pairs]
+        assert scores5 == scores0

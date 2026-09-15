@@ -390,9 +390,9 @@ TEST_F(AggregateTest, AddScoresFlagParses) {
 TEST_F(AggregateTest, NoContentDoesNotFetchContentOnMainThread) {
   AggregateParameters params(0);
   params.no_content = true;
-  EXPECT_FALSE(params.WillFetchContentOnMainThread());
+  EXPECT_TRUE(params.NoProcessingRequired());
   params.no_content = false;
-  EXPECT_TRUE(params.WillFetchContentOnMainThread());
+  EXPECT_FALSE(params.NoProcessingRequired());
 }
 
 TEST_F(AggregateTest, GetSerializationRange_NoStages) {

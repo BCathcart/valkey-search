@@ -312,12 +312,10 @@ absl::StatusOr<std::pair<size_t, size_t>> ProcessNeighborsForProcessing(
     scores_index = AggregateParameters::kScoreColumn;
   }
 
-  // no_content means LOAD requested no attributes, so return_attributes is
-  // empty and GetContent would fetch every field of every key only for
-  // CreateRecordsFromNeighbors to discard it. Skip it, as FT.SEARCH NOCONTENT
-  // does in HandleEarlyReplyScenarios — and with it the stale-match, expiry and
-  // slot-ownership pruning that only the fetch performs.
-  if (!parameters.no_content) {
+  // If no content needs to be fetched from the keys to be used in the
+  // aggregation pipeline, there is no need to revalidate keys and recompute
+  // scores.
+  if (!parameters.NoProcessingRequired()) {
     query::ProcessNeighborsForReply(
         ctx, parameters.index_schema->GetAttributeDataType(), neighbors,
         parameters, vector_identifier);

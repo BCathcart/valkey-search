@@ -2018,12 +2018,22 @@ class RecomputeScorerGateTest : public vmsdk::ValkeyTest {};
 TEST_F(RecomputeScorerGateTest, DefaultsToContentFetchingQueries) {
   UnitTestSearchParameters params;
   params.no_content = false;
-  EXPECT_TRUE(params.WillFetchContentOnMainThread());
+  EXPECT_FALSE(params.NoProcessingRequired());
   EXPECT_NE(params.GetContentProcessing(), query::kNoContent);
 
   params.no_content = true;
-  EXPECT_FALSE(params.WillFetchContentOnMainThread());
+  EXPECT_TRUE(params.NoProcessingRequired());
   EXPECT_EQ(params.GetContentProcessing(), query::kNoContent);
+}
+
+// NOCONTENT SORTBY reads the sort field out of the key, so it fetches content
+// and must get a scorer even though the reply carries no field values.
+TEST_F(RecomputeScorerGateTest, NoContentWithSortByStillFetches) {
+  UnitTestSearchParameters params;
+  params.no_content = true;
+  params.sortby_parameter = query::SortByParameter{.field = "rank"};
+  EXPECT_FALSE(params.NoProcessingRequired());
+  EXPECT_NE(params.GetContentProcessing(), query::kNoContent);
 }
 
 // A query that omits SCORER picks up the `default-scorer` config.

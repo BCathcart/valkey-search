@@ -103,6 +103,10 @@ struct AggregateParameters : public expr::Expression::CompileContext,
   // LIMIT offset & count.
   bool RequiresCompleteResults() const override;
 
+  // SORTBY does not lead to content fetching in the no content case unlike
+  // FT.SEARCH.
+  bool NoProcessingRequired() const override { return no_content; }
+
   //
   // Number of records required as output of the query phase.
   // If all records are required, then it will be

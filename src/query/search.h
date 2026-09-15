@@ -275,17 +275,12 @@ struct SearchParameters {
     return sortby_parameter.has_value();
   }
 
-  // Gates the background pre-build of recompute_scorer, matching
-  // GetContentProcessing() != kNoContent. Not virtual: forcing this true for a
-  // no_content query would enable a recompute without the contention check its
-  // per-key text index walk depends on.
-  bool WillFetchContentOnMainThread() const { return !no_content; }
   // True when the search needs no post-search processing: a NOCONTENT reply
   // where nothing (e.g. SORTBY) requires loading and reordering the full result
   // set first. When true, the query can complete on the background thread and
   // skip content loading.
-  bool NoProcessingRequired() const {
-    return no_content && !RequiresCompleteResults();
+  virtual bool NoProcessingRequired() const {
+    return no_content && !sortby_parameter.has_value();
   }
 
   virtual absl::Status PreParseQueryString();

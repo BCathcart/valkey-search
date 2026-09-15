@@ -1562,7 +1562,7 @@ absl::Status Search(SearchParameters &parameters, SearchMode search_mode) {
         parameters.filter_parse_results.root_predicate.get();
     if (root_predicate != nullptr &&
         !parameters.search_result.neighbors.empty() &&
-        parameters.WillFetchContentOnMainThread()) {
+        !parameters.NoProcessingRequired()) {
       parameters.recompute_scorer = std::make_unique<SingleDocumentScorer>(
           *parameters.index_schema, root_predicate,
           indexes::scoring::GetScorer(parameters.scorer),
