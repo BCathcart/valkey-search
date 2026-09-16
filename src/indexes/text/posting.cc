@@ -49,7 +49,7 @@ bool Postings::IsEmpty() const { return key_to_positions_.empty(); }
 
 void Postings::InsertKey(const Key& key, FlatPositionMap* flat_map, uint32_t tf,
                          uint32_t doc_len) {
-  key_to_positions_.emplace(key, PostingValue{flat_map, tf, doc_len});
+  key_to_positions_.emplace(key, PostingValue{flat_map, {tf, doc_len}});
 }
 
 // Remove a document key and all its positions
@@ -60,7 +60,7 @@ void Postings::RemoveKey(const Key& key, TextIndexMetadata* metadata) {
   FlatPositionMap* flat_map = node.mapped().map;
 
   metadata->total_positions -= flat_map->CountPositions();
-  metadata->total_term_frequency -= node.mapped().tf;
+  metadata->total_term_frequency -= node.mapped().doc_stats.tf;
 
   // Destroy and remove from map
   FlatPositionMap::Destroy(flat_map);
@@ -82,18 +82,18 @@ size_t Postings::GetPositionCount() const {
 size_t Postings::GetTotalTermFrequency() const {
   size_t total_frequency = 0;
   for (const auto& [key, value] : key_to_positions_) {
-    total_frequency += value.tf;
+    total_frequency += value.doc_stats.tf;
   }
   return total_frequency;
 }
 
-std::optional<PostingValue> Postings::LookupKey(
+std::optional<PostingDocStats> Postings::GetPostingDocStats(
     BorrowedInternedStringPtr key) const {
   auto it = key_to_positions_.find(key);
   if (it == key_to_positions_.end()) {
     return std::nullopt;
   }
-  return it->second;
+  return it->second.doc_stats;
 }
 
 // Defragment posting list
@@ -177,13 +177,13 @@ PositionIterator Postings::KeyIterator::GetPositionIterator() const {
 size_t Postings::KeyIterator::GetTermFrequency() const {
   CHECK(key_map_ != nullptr && current_ != end_)
       << "KeyIterator is invalid or exhausted";
-  return current_->second.tf;
+  return current_->second.doc_stats.tf;
 }
 
 uint32_t Postings::KeyIterator::GetDocLen() const {
   CHECK(key_map_ != nullptr && current_ != end_)
       << "KeyIterator is invalid or exhausted";
-  return current_->second.doc_len;
+  return current_->second.doc_stats.doc_len;
 }
 
 }  // namespace valkey_search::indexes::text

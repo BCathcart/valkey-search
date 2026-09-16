@@ -151,45 +151,27 @@ class TextIndexSchema {
   // Takes a borrowed key so neither scoring path (post-filter walk in
   // search.cc, in-iterator hot path in term.cc) incurs ref-count churn; owning
   // callers wrap their key in a BorrowedInternedStringPtr.
-  // No locking needed because only called from read phase.
-  uint32_t GetKeyDocLen(BorrowedInternedStringPtr key) const {
+  // No locking needed if called from read phase of time-slice mutex.
+  uint32_t GetKeyDocLen(BorrowedInternedStringPtr key, bool lock) const {
+    std::optional<std::lock_guard<std::mutex>> per_key_guard;
+    if (lock) {
+      per_key_guard.emplace(per_key_text_indexes_mutex_);
+    }
     auto itr = per_key_scoring_info_.find(key);
     return itr != per_key_scoring_info_.end() ? itr->second.doc_len : 0;
   }
 
-  // Locking-enabled version of GetKeyDocLen.
-  uint32_t GetKeyDocLen(BorrowedInternedStringPtr key, bool lock) const {
-    std::optional<std::lock_guard<std::mutex>> per_key_guard;
-    if (lock) per_key_guard.emplace(per_key_text_indexes_mutex_);
-    return GetKeyDocLen(key);
-  }
-
-  // The scoring inputs a key's posting entry carries. Deliberately drops
-  // PostingValue::map: DeleteKeyData destroys the FlatPositionMap, so a pointer
-  // to it must not outlive the bucket lock, and scoring never reads positions.
-  struct KeyPostingStats {
-    uint32_t tf = 0;
-    uint32_t doc_len = 0;
-  };
-
-  // Per-key scoring lookup: resolves `word` in the key's own text index and
-  // returns that key's posting stats, holding the word's bucket mutex — the one
-  // CommitKeyData/DeleteKeyData take across a Postings insert/erase — so it is
-  // safe outside the read phase. nullopt when the key does not carry the word.
-  //
-  // `per_key_index` comes from GetPerKeyTextIndex() and is rebuilt wholesale on
-  // every mutation, so unlike a Postings pinned earlier it always reaches the
-  // live object: re-indexing a word's last holder destroys that Postings and
-  // installs a fresh one.
-  std::optional<KeyPostingStats> LookupKeyPosting(
+  // Retrieves the document-level statistics needed to score the term.
+  // The revalidate logic ensures there are no in-flight mutations for this key
+  // and therefore the per-key rax tree is stable; however, the postings objects
+  // are shared with the schema-level rax trees and must be locked.
+  std::optional<PostingDocStats> LookupKeyPostingDocStats(
       const TextIndex &per_key_index, absl::string_view word,
       BorrowedInternedStringPtr key) {
     auto postings = per_key_index.GetPrefix().FindPostingsTarget(word);
     if (!postings) return std::nullopt;
     absl::MutexLock word_lock(&rax_target_mutex_pool_.Get(word));
-    auto entry = postings->LookupKey(key);
-    if (!entry) return std::nullopt;
-    return KeyPostingStats{entry->tf, entry->doc_len};
+    return postings->GetPostingDocStats(key);
   }
 
   uint32_t GetKeyNorm(const InternedStringPtr &key) const {
@@ -270,6 +252,8 @@ class TextIndexSchema {
   // pointer stability, so storing it inline avoids a per-document cache miss on
   // the GetKeyDocLen() scoring hot path.
   // Transparent functors so GetKeyDocLen() can probe with a borrowed key.
+  // TODO: combine with per_key_text_index_ to have a single map (e.g. per_key_text_data_)
+  //       to save space
   absl::flat_hash_map<Key, KeyScoringInfo, InternedStringPtrHash,
                       InternedStringPtrEq>
       per_key_scoring_info_;
@@ -325,16 +309,13 @@ class TextIndexSchema {
   uint64_t GetTotalTextIndexMemoryUsage() const;
 
   // Total number of keys with text fields indexed in this schema.
-  // No locking needed because only called from read phase.
-  size_t GetTrackedKeyCount() const { return per_key_text_indexes_.size(); }
-
-  // Locking-enabled version of GetTrackedKeyCount.
-  size_t GetTrackedKeyCount(bool lock) {
+  // No locking needed when called from read phase.
+  size_t GetTrackedKeyCount(bool lock = false) const {
     std::optional<std::lock_guard<std::mutex>> per_key_guard;
     if (lock) {
       per_key_guard.emplace(per_key_text_indexes_mutex_);
     }
-    return GetTrackedKeyCount();
+    return per_key_text_indexes_.size();
   }
 
   // Helper function to lookup text index for a key.

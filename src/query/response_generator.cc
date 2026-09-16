@@ -180,6 +180,8 @@ FilterVerification VerifyFilter(const query::SearchParameters &parameters,
   }
   predicate_revalidation.Increment();
 
+  // TODO(Brennan): Re-fetch postings from the cached terms the first time we reach here
+
   // The document changed between shard-side scoring and this content fetch, so
   // its carried Neighbor.score is stale. Besides re-checking membership, for a
   // non-vector query recompute the relevance score through the SAME Scorer seam
@@ -448,6 +450,7 @@ void ProcessNeighborsForReply(
   // such recompute means the carried scores are no longer globally ordered, so
   // the survivors must be re-ranked below (non-vector queries only).
   bool any_score_recomputed = false;
+  // TODO(Brennan): Re-fetch the new postings up front here?
   for (auto &neighbor : neighbors) {
     // Remote neighbors (from fanout) always have attribute_contents populated,
     // so they skip this entire block. Only local neighbors without content

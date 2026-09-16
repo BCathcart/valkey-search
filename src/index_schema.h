@@ -205,7 +205,7 @@ class IndexSchema : public KeyspaceEventSubscription,
     if (!text_index_schema_) {
       return 0;
     }
-    return text_index_schema_->GetKeyDocLen(key);
+    return text_index_schema_->GetKeyDocLen(key, false);
   }
 
   // Locking-enabled versions of the two accessors above, for callers outside
@@ -223,7 +223,7 @@ class IndexSchema : public KeyspaceEventSubscription,
     if (!text_index_schema_) {
       return 0;
     }
-    return text_index_schema_->GetKeyDocLen(key, /*lock=*/true);
+    return text_index_schema_->GetKeyDocLen(key, true);
   }
 
   uint32_t GetDocumentNorm(const Key &key) const

@@ -645,19 +645,15 @@ float SanitizeScore(float score) {
 // are resolved up front by ResolveLeaves rather than re-walked per document.
 struct ResolvedLeaf {
   // --- Text leaf (TermPredicate) ---
-  // Original term posting list first, followed by any stem-variant lists. Empty
+  // Original term posting mapping first, followed by any stem-variant's. Empty
   // when the term (and all its variants) are absent from the index.
-  absl::InlinedVector<indexes::text::InvasivePtr<indexes::text::Postings>,
+  struct PostingsMapping {
+    std::string term; // Term needed in case of main thread re-compute
+    indexes::text::InvasivePtr<indexes::text::Postings> postings;
+  };
+   absl::InlinedVector<PostingsMapping,
                       indexes::text::kStemVariantsInlineCapacity + 1>
       postings;
-  // The words `postings` was resolved from, parallel to it. The main-thread
-  // recompute path re-resolves through the key's own text index (see
-  // ScoreNode), so it needs the words and the schema owning their bucket
-  // mutexes. Inline capacity 1 covers the original word, the only entry unless
-  // the term also expands to stem variants; std::string is 32 bytes, so sizing
-  // this like `postings` would cost 680 bytes per leaf.
-  absl::InlinedVector<std::string, 1> words;
-  indexes::text::TextIndexSchema *text_index_schema = nullptr;
   uint32_t num_doc_contain_term = 0;
   // Query-invariant per-term weight (BM25 IDF), computed once here instead of
   // per candidate document.
@@ -717,7 +713,6 @@ void ResolveLeaves(const Predicate *predicate, uint32_t total_docs,
       const auto &prefix = text_index->GetPrefix();
 
       ResolvedLeaf leaf;
-      leaf.text_index_schema = text_index_schema.get();
       // Collect the words the term matches on: the original word plus, for a
       // non-exact term on a stemmed field, every variant sharing its stem root
       // (matching TermPredicate::Evaluate). Ingestion stores original words in
@@ -726,10 +721,12 @@ void ResolveLeaves(const Predicate *predicate, uint32_t total_docs,
         auto postings = prefix.FindPostingsTarget(word);
         // TODO: scoring for stemming. Redis treat stem variant as a leaf
         // num_doc_contain_term is counted twice and need fix in future
+        // TODO(Brennan): push {word, postings} even when postings is null so
+        // main-thread recompute can score a term the mutation just added.
         if (postings) {
           leaf.num_doc_contain_term += postings->GetKeyCount();
-          leaf.postings.push_back(std::move(postings));
-          leaf.words.emplace_back(word);
+          leaf.postings.push_back(
+              {std::string(word), std::move(postings)});
         }
       };
       add_word(term_pred->GetTextString());
@@ -756,6 +753,9 @@ void ResolveLeaves(const Predicate *predicate, uint32_t total_docs,
       // so clamp to keep the invariant.
       leaf.num_doc_contain_term =
           std::min(leaf.num_doc_contain_term, total_docs);
+      // TODO(Brennan): clamp dt to max(dt, 1) for PrecomputeIDF so a term
+      // absent at snapshot time (dt=0) but added by a mutation still has a
+      // finite cached IDF for the main-thread recompute path.
       leaf.term_weight =
           scorer->PrecomputeIDF({total_docs, leaf.num_doc_contain_term});
       resolved.emplace(term_pred, std::move(leaf));
@@ -790,6 +790,9 @@ void ResolveLeaves(const Predicate *predicate, uint32_t total_docs,
         // A value absent from the index (dt == 0) has no matching document and
         // never contributes a term; skip it so the per-document walk stays a
         // simple sum over present values.
+        // TODO(Brennan): drop this skip and clamp dt to max(dt, 1) so a tag
+        // value absent at snapshot time but added by a mutation still has a
+        // cached IDF for the main-thread recompute path.
         if (dt == 0) continue;
         leaf.tag_values.emplace_back(value,
                                      scorer->PrecomputeIDF({total_docs, dt}));
@@ -884,22 +887,25 @@ std::optional<float> ScoreNode(const Predicate *predicate,
       uint32_t tf = 0;
       uint32_t doc_len = 0;
       if (score_ctx.main_thread_revalidation.has_value()) {
-        // Off the read phase: go through the key's own text index rather than
-        // the Postings pinned at construction, which can be stale. See
-        // TextIndexSchema::LookupKeyPosting.
+        // For main thread score recompute, we must re-fetch the postings objects
+        // which may have since changed.
         const auto *per_key_index =
             score_ctx.main_thread_revalidation->per_key_text_index;
         if (per_key_index == nullptr) return std::nullopt;
-        for (const auto &word : leaf.words) {
-          if (auto entry = leaf.text_index_schema->LookupKeyPosting(
-                  *per_key_index, word, key)) {
+        auto *text_index_schema =
+            score_ctx.index_schema.GetTextIndexSchema().get();
+        if (text_index_schema == nullptr) return std::nullopt;
+        for (const auto &pm : leaf.postings) {
+          // Postings locking is handled at the schema level
+          if (auto entry = text_index_schema->LookupKeyPostingDocStats(
+                  *per_key_index, pm.term, key)) {
             tf += entry->tf;
             doc_len = entry->doc_len;
           }
         }
       } else {
-        for (const auto &postings : leaf.postings) {
-          if (auto entry = postings->LookupKey(key)) {
+        for (const auto &pm : leaf.postings) {
+          if (auto entry = pm.postings->GetPostingDocStats(key)) {
             tf += entry->tf;
             doc_len = entry->doc_len;
           }
@@ -1563,6 +1569,7 @@ absl::Status Search(SearchParameters &parameters, SearchMode search_mode) {
     if (root_predicate != nullptr &&
         !parameters.search_result.neighbors.empty() &&
         !parameters.NoProcessingRequired()) {
+      // TODO: us scorer already generated in pre-filter case
       parameters.recompute_scorer = std::make_unique<SingleDocumentScorer>(
           *parameters.index_schema, root_predicate,
           indexes::scoring::GetScorer(parameters.scorer),
