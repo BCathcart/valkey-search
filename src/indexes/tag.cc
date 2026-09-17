@@ -6,6 +6,7 @@
 
 #include "src/indexes/tag.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -22,7 +23,9 @@
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "src/index_schema.h"
 #include "src/indexes/index_base.h"
+#include "src/indexes/scoring/scorer.h"
 #include "src/indexes/text/rax/rax.h"
 #include "src/query/predicate.h"
 #include "src/utils/scanner.h"
@@ -356,9 +359,13 @@ bool Tag::ContainsKey(absl::string_view value,
 // -- Search / EntriesFetcher / EntriesFetcherIterator --------------------
 
 Tag::EntriesFetcherIterator::EntriesFetcherIterator(
-    const std::vector<void *> &slots,
-    const std::vector<InternedStringPtr> &extras)
-    : slots_(slots), extras_(extras) {
+    const Tag *index, const std::vector<void *> &slots,
+    const std::vector<InternedStringPtr> &extras,
+    const ScoringContext &scoring_context)
+    : index_(index),
+      slots_(slots),
+      extras_(extras),
+      scoring_context_(scoring_context) {
   AdvanceToNextNonEmpty();
 }
 
@@ -394,6 +401,37 @@ const InternedStringPtr &Tag::EntriesFetcherIterator::operator*() const {
   return current_;
 }
 
+float Tag::EntriesFetcherIterator::GetScore() const {
+  const auto &parameters = scoring_context_.parameters;
+  if (index_ == nullptr || parameters.index_schema == nullptr ||
+      parameters.scorer == nullptr) {
+    return 0.0f;
+  }
+
+  const BorrowedInternedStringPtr key(current_);
+  const uint32_t doc_len = parameters.needs_doc_len
+                               ? parameters.index_schema->GetDocumentLength(key)
+                               : 0;
+  float score = 0.0f;
+  for (const auto &[value, idf] : scoring_context_.values) {
+    if (index_->ContainsKey(value, key)) {
+      score += parameters.scorer->ScoreLeaf(
+          {idf, 1, doc_len, parameters.avg_doc_len, parameters.weight});
+    }
+  }
+  for (const auto &prefix : scoring_context_.prefixes) {
+    const uint32_t dt = static_cast<uint32_t>(std::min<size_t>(
+        index_->GetPrefixMatchDocCount(prefix, key), parameters.total_docs));
+    if (dt == 0) {
+      continue;
+    }
+    score += parameters.scorer->ScoreLeaf(
+        {parameters.scorer->PrecomputeIDF({parameters.total_docs, dt}), 1,
+         doc_len, parameters.avg_doc_len, parameters.weight});
+  }
+  return score;
+}
+
 void Tag::EntriesFetcherIterator::AdvanceToNextNonEmpty() {
   while (slot_idx_ < slots_.size()) {
     bag_ = BagOfInternedStringPtrs::Adopt(
@@ -414,12 +452,40 @@ void Tag::EntriesFetcherIterator::AdvanceToNextNonEmpty() {
 }
 
 std::unique_ptr<EntriesFetcherIteratorBase> Tag::EntriesFetcher::Begin() {
-  return std::make_unique<EntriesFetcherIterator>(matched_slots_, extras_);
+  return std::make_unique<EntriesFetcherIterator>(index_, matched_slots_,
+                                                  extras_, scoring_context_);
 }
 
 // TODO: b/357027854 - Support Suffix/Infix Search
 std::unique_ptr<EntriesFetcherBase> Tag::Search(
-    const query::TagPredicate &predicate, bool negate) const {
+    const query::TagPredicate &predicate, bool negate,
+    ScoringParameters scoring_parameters) const {
+  ScoringContext scoring_context{.parameters = scoring_parameters};
+  if (!negate && scoring_parameters.index_schema != nullptr &&
+      scoring_parameters.scorer != nullptr &&
+      scoring_parameters.total_docs > 0) {
+    absl::flat_hash_set<std::string> seen;
+    for (const auto &value : predicate.GetTags()) {
+      std::string normalized =
+          case_sensitive_ ? value : absl::AsciiStrToLower(value);
+      if (!seen.insert(normalized).second) {
+        continue;
+      }
+      if (!value.empty() && value.back() == '*') {
+        scoring_context.prefixes.push_back(value);
+        continue;
+      }
+      const uint32_t dt = static_cast<uint32_t>(std::min<size_t>(
+          GetTagValueDocCount(value), scoring_parameters.total_docs));
+      if (dt == 0) {
+        continue;
+      }
+      scoring_context.values.emplace_back(
+          value, scoring_parameters.scorer->PrecomputeIDF(
+                     {scoring_parameters.total_docs, dt}));
+    }
+  }
+
   // Collect matched rax slots (each slot's 8 bytes encode a bag) without
   // iterating their postings; the iterator yields lazily during Begin().
   absl::flat_hash_set<void *> seen;
@@ -485,12 +551,14 @@ std::unique_ptr<EntriesFetcherBase> Tag::Search(
       extras.push_back(k);
     }
     out_size = negate_total + extras.size();
-    return std::make_unique<EntriesFetcher>(std::move(negate_slots),
-                                            std::move(extras), out_size);
+    return std::make_unique<EntriesFetcher>(this, std::move(negate_slots),
+                                            std::move(extras), out_size,
+                                            ScoringContext{});
   }
 
-  return std::make_unique<EntriesFetcher>(std::move(matched_slots),
-                                          std::move(extras), out_size);
+  return std::make_unique<EntriesFetcher>(this, std::move(matched_slots),
+                                          std::move(extras), out_size,
+                                          std::move(scoring_context));
 }
 
 size_t Tag::GetTrackedKeyCount() const {

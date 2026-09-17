@@ -82,6 +82,18 @@ TEST_F(NumericIndexTest, SimpleAddModifyRemove) {
   EXPECT_FALSE(index.ModifyRecord("key5", "aaa").value());
 }
 
+TEST_F(NumericIndexTest, EntriesFetcherScoresZero) {
+  EXPECT_TRUE(index.AddRecord("key1", "1.0").value());
+  EXPECT_TRUE(index.AddRecord("key2", "2.0").value());
+  query::NumericPredicate predicate(&index, "attribute", "identifier", 1.0,
+                                    true, 2.0, true);
+  auto iterator = index.Search(predicate, false)->Begin();
+  while (!iterator->Done()) {
+    EXPECT_FLOAT_EQ(iterator->GetScore(), 0.0f);
+    iterator->Next();
+  }
+}
+
 // A NUMERIC field whose value does not parse as a number is invalid data (as
 // opposed to a missing field), in both the Add and Modify paths.
 TEST_F(NumericIndexTest, DetectsInvalidData) {

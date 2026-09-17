@@ -30,6 +30,14 @@
 #include "src/utils/string_interning.h"
 #include "vmsdk/src/valkey_module_api/valkey_module.h"
 
+namespace valkey_search {
+class IndexSchema;
+}  // namespace valkey_search
+
+namespace valkey_search::indexes::scoring {
+class Scorer;
+}  // namespace valkey_search::indexes::scoring
+
 namespace valkey_search::indexes {
 
 // Tag index backed by an in-tree vs_rax radix tree.
@@ -107,23 +115,42 @@ class Tag : public IndexBase {
   bool ContainsKey(absl::string_view value, BorrowedInternedStringPtr key) const
       ABSL_NO_THREAD_SAFETY_ANALYSIS;
 
+  struct ScoringParameters {
+    const IndexSchema *index_schema = nullptr;
+    const scoring::Scorer *scorer = nullptr;
+    uint32_t total_docs = 0;
+    float avg_doc_len = 0.0f;
+    float weight = 1.0f;
+    bool needs_doc_len = false;
+  };
+
+  struct ScoringContext {
+    ScoringParameters parameters;
+    std::vector<std::pair<std::string, float>> values;
+    std::vector<std::string> prefixes;
+  };
+
   // Iterator yielded by EntriesFetcher::Begin(). Walks a vector of rax slots
   // (each slot's 8 bytes encode a BagOfInternedStringPtrs); for negated
   // queries, also walks an extras vector of untracked keys.
   class EntriesFetcherIterator : public EntriesFetcherIteratorBase {
    public:
-    EntriesFetcherIterator(const std::vector<void *> &slots,
-                           const std::vector<InternedStringPtr> &extras);
+    EntriesFetcherIterator(const Tag *index, const std::vector<void *> &slots,
+                           const std::vector<InternedStringPtr> &extras,
+                           const ScoringContext &scoring_context);
     ~EntriesFetcherIterator() override;
     bool Done() const override;
     void Next() override;
     const InternedStringPtr &operator*() const override;
+    float GetScore() const override ABSL_NO_THREAD_SAFETY_ANALYSIS;
 
    private:
     void AdvanceToNextNonEmpty();
 
+    const Tag *index_;
     const std::vector<void *> &slots_;
     const std::vector<InternedStringPtr> &extras_;
+    const ScoringContext &scoring_context_;
     size_t slot_idx_{0};
     bool slots_done_{false};
     size_t extras_idx_{0};
@@ -139,22 +166,37 @@ class Tag : public IndexBase {
    public:
     EntriesFetcher(std::vector<void *> matched_slots,
                    std::vector<InternedStringPtr> extras, size_t size)
-        : size_(size),
+        : EntriesFetcher(nullptr, std::move(matched_slots), std::move(extras),
+                         size, ScoringContext{}) {}
+    EntriesFetcher(const Tag *index, std::vector<void *> matched_slots,
+                   std::vector<InternedStringPtr> extras, size_t size,
+                   ScoringContext scoring_context)
+        : index_(index),
+          size_(size),
           matched_slots_(std::move(matched_slots)),
-          extras_(std::move(extras)) {}
+          extras_(std::move(extras)),
+          scoring_context_(std::move(scoring_context)) {}
     size_t Size() const override { return size_; }
     std::unique_ptr<EntriesFetcherIteratorBase> Begin() override;
 
    private:
+    const Tag *index_;
     size_t size_;
     std::vector<void *> matched_slots_;
     std::vector<InternedStringPtr> extras_;
+    ScoringContext scoring_context_;
   };
 
   // Kept virtual so unit tests can mock Search; no production subclass.
   virtual std::unique_ptr<EntriesFetcherBase> Search(
+      const query::TagPredicate &predicate, bool negate,
+      ScoringParameters scoring_parameters) const
+      ABSL_NO_THREAD_SAFETY_ANALYSIS;
+  std::unique_ptr<EntriesFetcherBase> Search(
       const query::TagPredicate &predicate,
-      bool negate) const ABSL_NO_THREAD_SAFETY_ANALYSIS;
+      bool negate) const ABSL_NO_THREAD_SAFETY_ANALYSIS {
+    return Search(predicate, negate, ScoringParameters{});
+  }
 
   char GetSeparator() const { return separator_; }
   bool IsCaseSensitive() const { return case_sensitive_; }

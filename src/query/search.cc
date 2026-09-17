@@ -316,7 +316,7 @@ BuildTextIterator(const Predicate *predicate, bool negate,
 size_t EvaluateFilterAsPrimary(
     const SearchParameters &parameters, const Predicate *predicate,
     std::queue<std::unique_ptr<indexes::EntriesFetcherBase>> &entries_fetchers,
-    bool negate, float or_weight_multiplier) {
+    bool negate, float or_weight_multiplier, bool score_in_fetchers) {
   const QueryOperations query_operations =
       parameters.filter_parse_results.query_operations;
   const IndexSchema *index_schema = parameters.index_schema.get();
@@ -353,9 +353,9 @@ size_t EvaluateFilterAsPrimary(
       std::queue<std::unique_ptr<indexes::EntriesFetcherBase>> best_fetchers;
       for (const auto &child : composed_predicate->GetChildren()) {
         std::queue<std::unique_ptr<indexes::EntriesFetcherBase>> child_fetchers;
-        size_t child_size =
-            EvaluateFilterAsPrimary(parameters, child.get(), child_fetchers,
-                                    negate, or_weight_multiplier);
+        size_t child_size = EvaluateFilterAsPrimary(
+            parameters, child.get(), child_fetchers, negate,
+            or_weight_multiplier, score_in_fetchers);
         if (child_size < min_size) {
           min_size = child_size;
           best_fetchers = std::move(child_fetchers);
@@ -373,7 +373,8 @@ size_t EvaluateFilterAsPrimary(
       for (const auto &child : composed_predicate->GetChildren()) {
         std::queue<std::unique_ptr<indexes::EntriesFetcherBase>> child_fetchers;
         size_t child_size = EvaluateFilterAsPrimary(
-            parameters, child.get(), child_fetchers, negate, child_multiplier);
+            parameters, child.get(), child_fetchers, negate, child_multiplier,
+            score_in_fetchers);
         AppendQueue(entries_fetchers, child_fetchers);
         total_size += child_size;
       }
@@ -382,7 +383,25 @@ size_t EvaluateFilterAsPrimary(
   }
   if (predicate->GetType() == PredicateType::kTag) {
     auto tag_predicate = dynamic_cast<const TagPredicate *>(predicate);
-    auto fetcher = tag_predicate->GetIndex()->Search(*tag_predicate, negate);
+    indexes::Tag::ScoringParameters scoring_parameters;
+    if (score_in_fetchers) {
+      scoring_parameters.index_schema = index_schema;
+      scoring_parameters.scorer =
+          indexes::scoring::GetScorer(parameters.scorer);
+      scoring_parameters.total_docs = index_schema->GetIndexKeyInfoSize();
+      scoring_parameters.needs_doc_len =
+          scoring_parameters.scorer->NeedsDocumentLength();
+      if (scoring_parameters.needs_doc_len &&
+          scoring_parameters.total_docs > 0) {
+        scoring_parameters.avg_doc_len =
+            static_cast<float>(index_schema->GetTotalDocumentLength()) /
+            static_cast<float>(scoring_parameters.total_docs);
+      }
+      scoring_parameters.weight =
+          tag_predicate->GetWeight() * or_weight_multiplier;
+    }
+    auto fetcher = tag_predicate->GetIndex()->Search(*tag_predicate, negate,
+                                                     scoring_parameters);
     size_t size = fetcher->Size();
     entries_fetchers.push(std::move(fetcher));
     return size;
@@ -412,7 +431,7 @@ size_t EvaluateFilterAsPrimary(
     auto negate_predicate = dynamic_cast<const NegatePredicate *>(predicate);
     size_t result = EvaluateFilterAsPrimary(
         parameters, negate_predicate->GetPredicate(), entries_fetchers, !negate,
-        or_weight_multiplier);
+        or_weight_multiplier, score_in_fetchers);
     return result;
   }
   CHECK(false);
@@ -1297,29 +1316,16 @@ std::optional<float> SingleDocumentScorer::Score(
 absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
     const SearchParameters &parameters) {
   const IndexSchema *index_schema = parameters.index_schema.get();
-  const auto text_index_schema =
-      index_schema ? index_schema->GetTextIndexSchema() : nullptr;
-
   const auto *scorer = indexes::scoring::GetScorer(parameters.scorer);
-
-  // In-iterator scoring captures only the text iterator's score/weight, so it
-  // is valid solely for genuinely pure-text queries. Any query that also
-  // contains a numeric, tag, or negation predicate -- including mixed OR
-  // compositions that IsUnsolvedQuery leaves on the entries-fetcher path --
-  // must be scored via ScoreTextQuery below so both enclosing and leaf
-  // predicate weights survive.
+  const auto query_operations =
+      parameters.filter_parse_results.query_operations;
+  const bool requires_prefilter_evaluation = IsUnsolvedQuery(
+      query_operations, parameters.filter_parse_results.is_match_all);
   const bool has_non_text_predicate =
-      parameters.filter_parse_results.query_operations &
-      (QueryOperations::kContainsNumeric | QueryOperations::kContainsTag |
-       QueryOperations::kContainsNegate);
-
-  // In-iterator scoring runs only for pure text queries over a non-empty text
-  // index; match-all is excluded because its universal-set scan carries no
-  // TextIterator. Everything else is scored by the extra step below, which the
-  // kill switch short-circuits inside ScoreTextQuery.
+      query_operations & QueryOperations::kContainsNegate;
   const bool score_in_drain = !options::IsScoringDisabled() &&
-                              !has_non_text_predicate && text_index_schema &&
-                              text_index_schema->GetTrackedKeyCount() > 0 &&
+                              !has_non_text_predicate &&
+                              !requires_prefilter_evaluation &&
                               !parameters.filter_parse_results.is_match_all;
 
   std::queue<std::unique_ptr<indexes::EntriesFetcherBase>> entries_fetchers;
@@ -1332,7 +1338,7 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
   } else {
     qualified_entries = EvaluateFilterAsPrimary(
         parameters, parameters.filter_parse_results.root_predicate.get(),
-        entries_fetchers, false);
+        entries_fetchers, false, 1.0f, score_in_drain);
   }
 
   // Get the config for maximum number of keys to accumulate before content
@@ -1355,21 +1361,20 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
                         .score = 0.0f});
     return true;
   };
-  // Cannot skip evaluation if the query contains unsolved composed operations.
-  const bool requires_prefilter_evaluation =
-      IsUnsolvedQuery(parameters.filter_parse_results.query_operations,
-                      parameters.filter_parse_results.is_match_all);
   if (!requires_prefilter_evaluation) {
     bool needs_dedup =
         NeedsDeduplication(parameters.filter_parse_results.query_operations);
-    // Key -> slot in `borrowed`, so every OR branch matching a doc adds its
-    // score to the one entry instead of the repeats being dropped. Only
-    // pure-text OR accumulates: score_in_drain excludes tag/numeric/negate, so
-    // the other dedup user (tag) adds 0 and is scored by the extra step.
+    // Key -> slot in `borrowed`; a fetcher contributes its full key score once,
+    // and separate OR-branch fetchers add to the same result.
     absl::flat_hash_map<const char *, size_t> seen_at;
+    std::vector<size_t> last_score_fetcher;
     if (needs_dedup) {
-      seen_at.reserve(std::min(qualified_entries, static_cast<size_t>(5000)));
+      const size_t reserve =
+          std::min(qualified_entries, static_cast<size_t>(5000));
+      seen_at.reserve(reserve);
+      last_score_fetcher.reserve(reserve);
     }
+    size_t fetcher_id = 0;
     while (!entries_fetchers.empty()) {
       auto fetcher = std::move(entries_fetchers.front());
       entries_fetchers.pop();
@@ -1377,13 +1382,7 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
       while (!iterator->Done()) {
         const auto &key = **iterator;
         BACKGROUND_PAUSEPOINT("search_entries_fetcher");
-        // Read before dedup: a repeat sighting is another branch's match.
-        float raw = 0.0f;
-        if (score_in_drain) {
-          if (auto *text_iter = iterator->GetTextIterator()) {
-            raw = text_iter->GetScore();
-          }
-        }
+        const float raw = score_in_drain ? iterator->GetScore() : 0.0f;
         if (needs_dedup) {
           // try_emplace records the slot the push_back below will fill, so on
           // the max_keys break the index is left one past the end. Safe only
@@ -1392,7 +1391,10 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
           auto [it, inserted] =
               seen_at.try_emplace(key->Str().data(), borrowed.size());
           if (!inserted) {
-            borrowed[it->second].score += raw;
+            if (last_score_fetcher[it->second] != fetcher_id) {
+              borrowed[it->second].score += raw;
+              last_score_fetcher[it->second] = fetcher_id;
+            }
             iterator->Next();
             continue;
           }
@@ -1405,11 +1407,15 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
         borrowed.push_back({.key = BorrowedInternedStringPtr(key),
                             .distance = 0.0f,
                             .score = raw});
+        if (needs_dedup) {
+          last_score_fetcher.push_back(fetcher_id);
+        }
         iterator->Next();
         if (parameters.cancellation_token->IsCancelled()) {
           break;
         }
       }
+      ++fetcher_id;
       if (borrowed.size() >= max_keys ||
           parameters.cancellation_token->IsCancelled()) {
         break;
@@ -1424,9 +1430,6 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
       }
     }
   } else {
-    // Combined (text + numeric/tag/negate) queries take the prefilter path and
-    // are scored in the extra step below, since in-iterator scoring only works
-    // for pure text queries.
     EvaluatePrefilteredKeys(parameters, entries_fetchers,
                             std::move(results_appender), qualified_entries,
                             /*stop_on_fetch_limit=*/true);
@@ -1434,9 +1437,7 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
   if (fetch_limited) {
     nonvector_results_fetched_limited_count.Increment();
   }
-  // Extra step scoring: everything the drain loop did not score, i.e. combined
-  // (text + numeric/tag/negate) queries and match-all, which reaches
-  // ScoreTextQuery's null-predicate wildcard branch.
+  // Match-all, negate, and prefiltered AND paths still need the predicate walk.
   if (!borrowed.empty() && !score_in_drain) {
     ScoreTextQuery(*parameters.index_schema,
                    parameters.filter_parse_results.root_predicate.get(), scorer,

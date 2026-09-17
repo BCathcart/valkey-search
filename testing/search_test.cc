@@ -7,6 +7,7 @@
 
 #include "src/query/search.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -131,7 +132,8 @@ class MockTag : public indexes::Tag {
   MockTag(const data_model::TagIndex &tag_index_proto)
       : indexes::Tag(tag_index_proto) {}
   MOCK_METHOD(std::unique_ptr<indexes::EntriesFetcherBase>, Search,
-              (const query::TagPredicate &predicate, bool negate),
+              (const query::TagPredicate &predicate, bool negate,
+               indexes::Tag::ScoringParameters scoring_parameters),
               (const, override));
 };
 
@@ -217,10 +219,10 @@ void InitIndexSchema(MockIndexSchema *index_schema) {
 
   VMSDK_EXPECT_OK(index_schema->AddIndex("tag_index_100_15", "tag_index_100_15",
                                          tag_index_100_15));
-  EXPECT_CALL(*tag_index_100_15, Search(_, false)).WillRepeatedly([]() {
+  EXPECT_CALL(*tag_index_100_15, Search(_, false, _)).WillRepeatedly([]() {
     return std::make_unique<TestedTagEntriesFetcher>(15);
   });
-  EXPECT_CALL(*tag_index_100_15, Search(_, true)).WillRepeatedly([]() {
+  EXPECT_CALL(*tag_index_100_15, Search(_, true, _)).WillRepeatedly([]() {
     return std::make_unique<TestedTagEntriesFetcher>(85);
   });
 }
@@ -1468,10 +1470,8 @@ INSTANTIATE_TEST_SUITE_P(
 class ScoreTextQueryTestBase : public ValkeySearchTest {
  protected:
   // Schema with a text field "text", a case-insensitive tag field "color", and
-  // a numeric field "rating", so ScoreTextQuery sees real posting lists and a
-  // non-zero corpus. Each doc is (key, text, color); an empty color leaves the
-  // doc untracked by the tag index, and the numeric field needs no records
-  // (ScoreNode's numeric case returns 0 without touching the index).
+  // a numeric field "rating". Each doc is (key, text, color), and ratings are
+  // assigned from 1 in document order.
   std::shared_ptr<MockIndexSchema> BuildTextTagSchema(
       const std::vector<std::tuple<std::string, std::string, std::string>>
           &docs) {
@@ -1487,12 +1487,10 @@ class ScoreTextQueryTestBase : public ValkeySearchTest {
     auto tag = std::make_shared<indexes::Tag>(
         CreateTagIndexProto(/*separator=*/",", /*case_sensitive=*/false));
     VMSDK_EXPECT_OK(schema->AddIndex("color", "color", tag));
-    // A numeric field so text+numeric composition can be scored. ScoreNode's
-    // kNumeric case returns 0 without touching the index (the pre-filter admits
-    // range membership), so the numeric index needs no records for scoring.
     auto numeric =
         std::make_shared<indexes::Numeric>(CreateNumericIndexProto());
     VMSDK_EXPECT_OK(schema->AddIndex("rating", "rating", numeric));
+    size_t rating = 1;
     for (const auto &[k, content, color] : docs) {
       auto key = StringInternStore::Intern(k);
       VMSDK_EXPECT_OK(text->AddRecord(
@@ -1502,6 +1500,9 @@ class ScoreTextQueryTestBase : public ValkeySearchTest {
         VMSDK_EXPECT_OK(tag->AddRecord(
             key, AttributeData(vmsdk::MakeUniqueValkeyString(color))));
       }
+      VMSDK_EXPECT_OK(numeric->AddRecord(
+          key, AttributeData(
+                   vmsdk::MakeUniqueValkeyString(std::to_string(rating++)))));
       schema->SetIndexMutationSequenceNumber(key, 0);
     }
     return schema;
@@ -1544,6 +1545,22 @@ class ScoreTextQueryTestBase : public ValkeySearchTest {
       return std::nullopt;
     }
     return cands[0].score;
+  }
+
+  std::vector<indexes::Neighbor> SearchNonVector(
+      const std::shared_ptr<MockIndexSchema> &schema,
+      absl::string_view filter) {
+    UnitTestSearchParameters parameters;
+    parameters.index_schema_name = kIndexSchemaName;
+    parameters.index_schema = schema;
+    parameters.limit.number = 100;
+    TextParsingOptions options{};
+    auto parsed = FilterParser(*schema, filter, options).Parse();
+    EXPECT_TRUE(parsed.ok()) << parsed.status();
+    if (!parsed.ok()) return {};
+    parameters.filter_parse_results = std::move(parsed).value();
+    VMSDK_EXPECT_OK(query::Search(parameters, query::SearchMode::kLocal));
+    return std::move(parameters.search_result.neighbors);
   }
 
   // Score `key` for `filter` through the IN-ITERATOR path
@@ -1747,6 +1764,60 @@ INSTANTIATE_TEST_SUITE_P(
          .expected = [](const auto &b) { return b[0]; }},
     }),
     [](const TestParamInfo<ScoreCase> &info) { return info.param.test_name; });
+
+// --- Drain-loop scoring -----------------------------------------------------
+
+TEST_F(ScoreTextQueryTestBase, PureTagDrainScoresMatchScoreNode) {
+  auto schema = BuildTextTagSchema({
+      {"d1", "aa", "red"},
+      {"d2", "aa", "red"},
+      {"d3", "aa", "red,reef"},
+  });
+
+  for (const auto &[filter, key] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"@color:{red|reef}", "d3"}, {"@color:{re*}", "d3"}}) {
+    auto expected = Score(*schema, filter, key);
+    ASSERT_TRUE(expected.has_value());
+    auto results = SearchNonVector(schema, filter);
+    auto result = std::find_if(
+        results.begin(), results.end(),
+        [&](const auto &n) { return n.external_id->Str() == key; });
+    ASSERT_NE(result, results.end());
+    EXPECT_GT(result->score, 0.0f);
+    EXPECT_FLOAT_EQ(result->score, *expected);
+  }
+}
+
+TEST_F(ScoreTextQueryTestBase, PureNumericDrainScoresZero) {
+  auto schema = BuildTextTagSchema({
+      {"d1", "aa", "red"},
+      {"d2", "aa", "blue"},
+      {"d3", "aa", "green"},
+  });
+  auto results = SearchNonVector(schema, "@rating:[1 2]");
+  ASSERT_EQ(results.size(), 2u);
+  for (const auto &result : results) {
+    EXPECT_FLOAT_EQ(result.score, 0.0f);
+  }
+}
+
+TEST_F(ScoreTextQueryTestBase, TagNumericOrScoresInDrain) {
+  auto schema = BuildTextTagSchema({
+      {"d1", "aa", "red"},
+      {"d2", "aa", "red"},
+      {"d3", "aa", "blue"},
+  });
+  auto expected_tag = Score(*schema, "@color:{blue}", "d3");
+  ASSERT_TRUE(expected_tag.has_value());
+
+  auto results = SearchNonVector(schema, "@color:{blue} | @rating:[1 1]");
+  ASSERT_EQ(results.size(), 2u);
+  EXPECT_EQ(results[0].external_id->Str(), "d3");
+  EXPECT_FLOAT_EQ(results[0].score, *expected_tag);
+  EXPECT_EQ(results[1].external_id->Str(), "d1");
+  EXPECT_FLOAT_EQ(results[1].score, 0.0f);
+}
 
 // --- Tag scoring: relationships not expressible as a same-key formula --------
 //

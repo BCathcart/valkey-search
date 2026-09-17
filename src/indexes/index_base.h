@@ -28,10 +28,6 @@ namespace valkey_search {
 class AttributeData;
 }  // namespace valkey_search
 
-namespace valkey_search::indexes::text {
-class TextIterator;
-}  // namespace valkey_search::indexes::text
-
 namespace valkey_search::indexes {
 enum class IndexerType { kHNSW, kFlat, kNumeric, kTag, kVector, kNone, kText };
 
@@ -136,10 +132,8 @@ class EntriesFetcherIteratorBase {
   virtual bool Done() const = 0;
   virtual void Next() = 0;
   virtual const InternedStringPtr &operator*() const = 0;
+  virtual float GetScore() const { return 0.0f; }
   virtual ~EntriesFetcherIteratorBase() = default;
-
-  // Returns the underlying TextIterator if available, nullptr otherwise.
-  virtual const text::TextIterator *GetTextIterator() const { return nullptr; }
 };
 
 class EntriesFetcherBase {
