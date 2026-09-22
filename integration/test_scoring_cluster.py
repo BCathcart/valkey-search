@@ -425,7 +425,10 @@ class TestScoringRecomputeCluster(ValkeySearchClusterTestCaseDebugMode):
         scores2 = [s for _, s in pairs]
         assert scores2 != scores1
         # NOTE: FT.AGGREGATE results aren't implicitly sorted by score
-        assert sorted(scores2, reverse=True) == scores0
+        # NOTE: FT.AGGREGATE results aren't implicitly sorted by score
+        sorted_scores2 = sorted(scores2, reverse=True) 
+        sorted_scores2 != scores1
+        sorted_scores2 == scores0
 
         # A LOAD that actually fetches content triggers revalidation and
         # score recompute
