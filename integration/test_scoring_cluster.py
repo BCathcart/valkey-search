@@ -409,6 +409,8 @@ class TestScoringRecomputeCluster(ValkeySearchClusterTestCaseDebugMode):
         assert sorted(k for k, _ in pairs) == sorted(DOCS)
         scores1 = [s for _, s in pairs]
         assert all(s > 0 for s in scores1)
+        scores1 != scores0
+        sorted(scores1) != sorted(scores0)
 
         # LOAD __key doesn't resolve to a record attribute, so no content from
         # updated key is fetched and therefore no revalidation is needed.
@@ -423,7 +425,10 @@ class TestScoringRecomputeCluster(ValkeySearchClusterTestCaseDebugMode):
         scores2 = [s for _, s in pairs]
         assert scores2 != scores1
         # NOTE: FT.AGGREGATE results aren't implicitly sorted by score
-        assert sorted(scores2, reverse=True) == scores0
+        # NOTE: FT.AGGREGATE results aren't implicitly sorted by score
+        sorted_scores2 = sorted(scores2, reverse=True) 
+        sorted_scores2 != scores1
+        sorted_scores2 == scores0
 
         # A LOAD that actually fetches content triggers revalidation and
         # score recompute
