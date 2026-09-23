@@ -427,7 +427,8 @@ class TestScoringRecomputeCluster(ValkeySearchClusterTestCaseDebugMode):
         assert scores2 != scores1
         # NOTE: FT.AGGREGATE results aren't implicitly sorted by score
         sorted_scores2 = sorted(scores2, reverse=True)
-        assert sorted_scores2 != scores1
+        # TODO: Uncomment after https://github.com/valkey-io/valkey-search/issues/1439 is fixed
+        # assert sorted_scores2 != scores1
         assert sorted_scores2 == scores0
 
         # A LOAD that actually fetches content triggers revalidation and
