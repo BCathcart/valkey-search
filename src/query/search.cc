@@ -1317,14 +1317,11 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
     const SearchParameters &parameters) {
   const IndexSchema *index_schema = parameters.index_schema.get();
   const auto *scorer = indexes::scoring::GetScorer(parameters.scorer);
-  const auto query_operations =
-      parameters.filter_parse_results.query_operations;
-  const bool requires_prefilter_evaluation = IsUnsolvedQuery(
-      query_operations, parameters.filter_parse_results.is_match_all);
-  const bool has_non_text_predicate =
-      query_operations & QueryOperations::kContainsNegate;
+  const bool requires_prefilter_evaluation =
+      IsUnsolvedQuery(parameters.filter_parse_results.query_operations,
+                      parameters.filter_parse_results.is_match_all);
+  // Negated queries are covered: negate implies prefilter evaluation.
   const bool score_in_drain = !options::IsScoringDisabled() &&
-                              !has_non_text_predicate &&
                               !requires_prefilter_evaluation &&
                               !parameters.filter_parse_results.is_match_all;
 

@@ -164,10 +164,6 @@ class Tag : public IndexBase {
 
   class EntriesFetcher : public EntriesFetcherBase {
    public:
-    EntriesFetcher(std::vector<void *> matched_slots,
-                   std::vector<InternedStringPtr> extras, size_t size)
-        : EntriesFetcher(nullptr, std::move(matched_slots), std::move(extras),
-                         size, ScoringContext{}) {}
     EntriesFetcher(const Tag *index, std::vector<void *> matched_slots,
                    std::vector<InternedStringPtr> extras, size_t size,
                    ScoringContext scoring_context)

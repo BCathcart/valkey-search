@@ -402,12 +402,12 @@ const InternedStringPtr &Tag::EntriesFetcherIterator::operator*() const {
 }
 
 float Tag::EntriesFetcherIterator::GetScore() const {
-  const auto &parameters = scoring_context_.parameters;
-  if (index_ == nullptr || parameters.index_schema == nullptr ||
-      parameters.scorer == nullptr) {
+  // Search() populates values/prefixes only when the scoring inputs are valid.
+  if (scoring_context_.values.empty() && scoring_context_.prefixes.empty()) {
     return 0.0f;
   }
 
+  const auto &parameters = scoring_context_.parameters;
   const BorrowedInternedStringPtr key(current_);
   const uint32_t doc_len = parameters.needs_doc_len
                                ? parameters.index_schema->GetDocumentLength(key)

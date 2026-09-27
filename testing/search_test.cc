@@ -140,9 +140,11 @@ class MockTag : public indexes::Tag {
 class TestedTagEntriesFetcher : public indexes::Tag::EntriesFetcher {
  public:
   explicit TestedTagEntriesFetcher(size_t size)
-      : indexes::Tag::EntriesFetcher(/*matched_slots=*/{},
+      : indexes::Tag::EntriesFetcher(/*index=*/nullptr,
+                                     /*matched_slots=*/{},
                                      /*extras=*/{},
-                                     /*size=*/size),
+                                     /*size=*/size,
+                                     /*scoring_context=*/{}),
         size_(size) {}
 
   size_t Size() const override { return size_; }

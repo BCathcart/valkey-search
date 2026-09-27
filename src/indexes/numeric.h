@@ -88,7 +88,6 @@ class Numeric : public IndexBase {
     bool Done() const override;
     void Next() override;
     const InternedStringPtr &operator*() const override;
-    float GetScore() const override { return 0.0f; }
 
    private:
     const EntriesRange &entries_range_;
