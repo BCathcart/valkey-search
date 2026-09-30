@@ -97,7 +97,15 @@ function(_add_global_build_flag _FLAG)
 endfunction()
 
 function(valkey_search_target_update_compile_flags TARGET)
-  target_compile_options(${TARGET} PRIVATE -falign-functions=5)
+  # Pin function starts to a 64-byte cache line and loop headers to a 32-byte
+  # fetch window. -falign-functions=N is a byte count, so the previous value of
+  # 5 emitted `.p2align 3,,4` (8-byte alignment, only when it costs <= 4 bytes
+  # of padding), i.e. effectively no alignment: hot functions landed at
+  # arbitrary offsets and shifted whenever unrelated code changed size, which
+  # showed up as +/-5% swings in query throughput between otherwise identical
+  # builds (uop-cache / DSB-to-MITE penalties). Cost: ~0.2 MB on libsearch.so.
+  target_compile_options(${TARGET} PRIVATE -falign-functions=64)
+  target_compile_options(${TARGET} PRIVATE -falign-loops=32)
   target_compile_options(${TARGET} PRIVATE -fmath-errno)
   target_compile_options(${TARGET} PRIVATE -ffp-contract=off)
   target_compile_options(${TARGET} PRIVATE -fno-rounding-math)
