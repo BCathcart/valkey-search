@@ -47,30 +47,21 @@ class BlockedClientTracker {
       BlockedClientCategory category) const
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(blocked_clients_mutex);
 
-  // The client whose shared block a BlockedClientHold is keeping alive, or 0.
-  unsigned long long held_client_id() const
-      ABSL_EXCLUSIVE_LOCKS_REQUIRED(blocked_clients_mutex) {
-    return held_client_id_;
-  }
-
  private:
-  friend class BlockedClientHold;
   BlockedClientTracker() = default;
 
   std::array<absl::NoDestructor<
                  absl::flat_hash_map<unsigned long long, BlockedClientEntry>>,
              static_cast<size_t>(BlockedClientCategory::kCategoryCount)>
       tracked_blocked_clients_;
-  unsigned long long held_client_id_ ABSL_GUARDED_BY(blocked_clients_mutex){0};
 };
 
-// Keeps the shared (handle_duplication) block of ctx's client from being
-// released while in scope. The holders of a shared block are registered one by
-// one on the main thread while workers may already be dropping theirs; once the
-// count reaches zero the block is released and Valkey refuses to block the
-// still-blocked client again, leaving the holders registered afterwards with
-// no block at all. While a hold is active the release is postponed to the end
-// of the hold, where it happens only if no holder registered in the meantime.
+// Keeps the shared (handle_duplication) block of ctx's client alive while in
+// scope. Its holders register one at a time on the main thread while workers
+// may already be dropping theirs; once the count hits zero Valkey refuses to
+// block the still-blocked client again, so later holders would run unblocked.
+// A release falling inside the hold happens at its end instead, unless a
+// holder registered in the meantime.
 class BlockedClientHold {
  public:
   explicit BlockedClientHold(ValkeyModuleCtx *ctx);
@@ -79,8 +70,7 @@ class BlockedClientHold {
   BlockedClientHold &operator=(const BlockedClientHold &) = delete;
 
  private:
-  unsigned long long client_id_{0};
-  unsigned long long previous_held_client_id_{0};
+  unsigned long long client_id_;
 };
 
 class BlockedClient {

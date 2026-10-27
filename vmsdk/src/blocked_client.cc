@@ -17,6 +17,7 @@
 
 namespace vmsdk {
 absl::Mutex blocked_clients_mutex;
+unsigned long long held_client_id ABSL_GUARDED_BY(blocked_clients_mutex) = 0;
 
 // Implementation for BlockedClientTracker
 BlockedClientTracker &BlockedClientTracker::GetInstance() {
@@ -116,14 +117,13 @@ void BlockedClient::UnblockClient() {
 
   if (tracked_client_id) {
     absl::MutexLock lock(&blocked_clients_mutex);
-    auto &tracker = BlockedClientTracker::GetInstance();
-    auto &category_map = tracker[category];
+    auto &category_map = BlockedClientTracker::GetInstance()[category];
     auto itr = category_map.find(tracked_client_id);
     CHECK(itr != category_map.end());
     auto &cnt = itr->second.cnt;
     CHECK_GT(cnt, 0);
     --cnt;
-    if (cnt > 0 || tracker.held_client_id() == tracked_client_id) {
+    if (cnt > 0 || tracked_client_id == held_client_id) {
       return;
     }
     category_map.erase(tracked_client_id);
@@ -138,9 +138,7 @@ BlockedClientHold::BlockedClientHold(ValkeyModuleCtx *ctx)
     return;
   }
   absl::MutexLock lock(&blocked_clients_mutex);
-  auto &tracker = BlockedClientTracker::GetInstance();
-  previous_held_client_id_ = tracker.held_client_id_;
-  tracker.held_client_id_ = client_id_;
+  held_client_id = client_id_;
 }
 
 BlockedClientHold::~BlockedClientHold() {
@@ -150,8 +148,8 @@ BlockedClientHold::~BlockedClientHold() {
   std::vector<ValkeyModuleBlockedClient *> released;
   {
     absl::MutexLock lock(&blocked_clients_mutex);
+    held_client_id = 0;
     auto &tracker = BlockedClientTracker::GetInstance();
-    tracker.held_client_id_ = previous_held_client_id_;
     for (size_t i = 0;
          i < static_cast<size_t>(BlockedClientCategory::kCategoryCount); ++i) {
       auto &category_map = tracker[static_cast<BlockedClientCategory>(i)];

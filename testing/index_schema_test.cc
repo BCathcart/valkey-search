@@ -707,11 +707,10 @@ TEST_F(IndexSchemaSubscriptionSimpleTest, DropIndexPrematurely) {
 
 TEST_F(IndexSchemaSubscriptionSimpleTest,
        ClientStaysBlockedUntilEverySchemaApplied) {
-  // Two schemas cover the key and share the client's block. Each scheduled
-  // mutation runs to completion immediately, like a worker finishing before the
-  // main thread has notified the next schema. The client may only be released
-  // once both schemas have applied the mutation, and the block must not be
-  // re-taken: Valkey rejects a second BlockClient on a still-blocked client.
+  // Two schemas share the client's block. Each mutation runs to completion the
+  // moment it is scheduled, like a worker finishing before the main thread has
+  // notified the next schema; the client must only be released once both have
+  // applied it.
   MockThreadPool mutations_thread_pool("writer-thread-pool-", 1);
   EXPECT_CALL(mutations_thread_pool, Schedule(testing::_, testing::_))
       .WillRepeatedly(
@@ -758,8 +757,7 @@ TEST_F(IndexSchemaSubscriptionSimpleTest,
   EXPECT_CALL(*kMockValkeyModule, GetClientId(testing::_))
       .WillRepeatedly(Return(1));
 
-  // The schemas are notified in an unspecified order, so only the block and
-  // the release are ordered against each of them.
+  // Notification order is unspecified; only block and release are ordered.
   testing::Sequence first_applied, second_applied;
   EXPECT_CALL(
       *kMockValkeyModule,
