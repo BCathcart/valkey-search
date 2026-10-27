@@ -705,6 +705,82 @@ TEST_F(IndexSchemaSubscriptionSimpleTest, DropIndexPrematurely) {
             0);
 }
 
+TEST_F(IndexSchemaSubscriptionSimpleTest,
+       ClientStaysBlockedUntilEverySchemaApplied) {
+  // Two schemas cover the key and share the client's block. Each scheduled
+  // mutation runs to completion immediately, like a worker finishing before the
+  // main thread has notified the next schema. The client may only be released
+  // once both schemas have applied the mutation, and the block must not be
+  // re-taken: Valkey rejects a second BlockClient on a still-blocked client.
+  MockThreadPool mutations_thread_pool("writer-thread-pool-", 1);
+  EXPECT_CALL(mutations_thread_pool, Schedule(testing::_, testing::_))
+      .WillRepeatedly(
+          [](absl::AnyInvocable<void()> task, vmsdk::ThreadPool::Priority) {
+            task();
+            return true;
+          });
+  std::vector<absl::string_view> key_prefixes = {"prefix:"};
+  auto key = StringInternStore::Intern("prefix:key");
+  auto key_valkey_str = vmsdk::MakeUniqueValkeyString(key->Str());
+  const char *field = "vector";
+
+  std::vector<std::shared_ptr<MockIndexSchema>> index_schemas;
+  std::vector<std::shared_ptr<MockIndex>> mock_indexes;
+  for (const auto &name : {"first", "second"}) {
+    auto index_schema =
+        MockIndexSchema::Create(&fake_ctx_, name, key_prefixes,
+                                std::make_unique<HashAttributeDataType>(),
+                                &mutations_thread_pool)
+            .value();
+    auto mock_index = std::make_shared<MockIndex>();
+    VMSDK_EXPECT_OK(
+        index_schema->AddIndex("attribute_name", field, mock_index));
+    EXPECT_CALL(*mock_index, IsTracked(key)).WillRepeatedly(Return(false));
+    index_schemas.push_back(std::move(index_schema));
+    mock_indexes.push_back(std::move(mock_index));
+  }
+
+  EXPECT_CALL(*kMockValkeyModule, KeyType(testing::_))
+      .WillRepeatedly(TestValkeyModule_KeyTypeDefaultImpl);
+  EXPECT_CALL(*kMockValkeyModule,
+              KeyType(vmsdk::ValkeyModuleKeyIsForString(key->Str())))
+      .WillRepeatedly(Return(VALKEYMODULE_KEYTYPE_HASH));
+  EXPECT_CALL(*kMockValkeyModule,
+              HashGet(vmsdk::ValkeyModuleKeyIsForString(key->Str()),
+                      VALKEYMODULE_HASH_CFIELDS, StrEq(field),
+                      An<ValkeyModuleString **>(), TypedEq<void *>(nullptr)))
+      .WillRepeatedly([](ValkeyModuleKey *, int, const char *,
+                         ValkeyModuleString **value_out, void *) {
+        *value_out =
+            TestValkeyModule_CreateStringPrintf(nullptr, "vector_buffer");
+        return VALKEYMODULE_OK;
+      });
+  EXPECT_CALL(*kMockValkeyModule, GetClientId(testing::_))
+      .WillRepeatedly(Return(1));
+
+  // The schemas are notified in an unspecified order, so only the block and
+  // the release are ordered against each of them.
+  testing::Sequence first_applied, second_applied;
+  EXPECT_CALL(
+      *kMockValkeyModule,
+      BlockClient(testing::_, testing::_, testing::_, testing::_, testing::_))
+      .InSequence(first_applied, second_applied)
+      .WillOnce(Return((ValkeyModuleBlockedClient *)1));
+  EXPECT_CALL(*mock_indexes[0], AddRecord(key, testing::_))
+      .InSequence(first_applied)
+      .WillOnce(Return(indexes::RecordResult::kAdded));
+  EXPECT_CALL(*mock_indexes[1], AddRecord(key, testing::_))
+      .InSequence(second_applied)
+      .WillOnce(Return(indexes::RecordResult::kAdded));
+  EXPECT_CALL(*kMockValkeyModule,
+              UnblockClient((ValkeyModuleBlockedClient *)1, nullptr))
+      .InSequence(first_applied, second_applied)
+      .WillOnce(Return(1));
+
+  KeyspaceEventManager::Instance().NotifySubscribers(
+      &fake_ctx_, VALKEYMODULE_NOTIFY_HASH, "event", key_valkey_str.get());
+}
+
 TEST_F(IndexSchemaSubscriptionSimpleTest, EmptyKeyPrefixesTest) {
   vmsdk::ThreadPool mutations_thread_pool("writer-thread-pool-", 1);
   mutations_thread_pool.StartWorkers();

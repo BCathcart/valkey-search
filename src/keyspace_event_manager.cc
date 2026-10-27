@@ -19,6 +19,7 @@
 #include "src/indexes/vector_base.h"
 #include "src/utils/string_interning.h"
 #include "src/vector_registry.h"
+#include "vmsdk/src/blocked_client.h"
 #include "vmsdk/src/status/status_macros.h"
 #include "vmsdk/src/type_conversions.h"
 #include "vmsdk/src/utils.h"
@@ -142,6 +143,8 @@ void KeyspaceEventManager::NotifySubscribers(ValkeyModuleCtx *ctx, int type,
     return;
   }
 
+  // Subscriptions share the notifying client's block; see BlockedClientHold.
+  vmsdk::BlockedClientHold blocked_client_hold(ctx);
   if (IsMoveToEvent(event)) {
     CHECK(moved_src_key_);
     ProcessMoveNotification(ctx, type, key, event);

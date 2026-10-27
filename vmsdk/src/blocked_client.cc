@@ -7,6 +7,8 @@
 
 #include "vmsdk/src/blocked_client.h"
 
+#include <vector>
+
 #include "absl/base/no_destructor.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/check.h"
@@ -114,19 +116,56 @@ void BlockedClient::UnblockClient() {
 
   if (tracked_client_id) {
     absl::MutexLock lock(&blocked_clients_mutex);
-    auto &category_map = BlockedClientTracker::GetInstance()[category];
+    auto &tracker = BlockedClientTracker::GetInstance();
+    auto &category_map = tracker[category];
     auto itr = category_map.find(tracked_client_id);
     CHECK(itr != category_map.end());
     auto &cnt = itr->second.cnt;
     CHECK_GT(cnt, 0);
     --cnt;
-    if (cnt > 0) {
+    if (cnt > 0 || tracker.held_client_id() == tracked_client_id) {
       return;
     }
     category_map.erase(tracked_client_id);
   }
   MeasureTimeEnd(blocked_client);
   ValkeyModule_UnblockClient(blocked_client, private_data);
+}
+
+BlockedClientHold::BlockedClientHold(ValkeyModuleCtx *ctx)
+    : client_id_(ValkeyModule_GetClientId(ctx)) {
+  if (client_id_ == 0) {
+    return;
+  }
+  absl::MutexLock lock(&blocked_clients_mutex);
+  auto &tracker = BlockedClientTracker::GetInstance();
+  previous_held_client_id_ = tracker.held_client_id_;
+  tracker.held_client_id_ = client_id_;
+}
+
+BlockedClientHold::~BlockedClientHold() {
+  if (client_id_ == 0) {
+    return;
+  }
+  std::vector<ValkeyModuleBlockedClient *> released;
+  {
+    absl::MutexLock lock(&blocked_clients_mutex);
+    auto &tracker = BlockedClientTracker::GetInstance();
+    tracker.held_client_id_ = previous_held_client_id_;
+    for (size_t i = 0;
+         i < static_cast<size_t>(BlockedClientCategory::kCategoryCount); ++i) {
+      auto &category_map = tracker[static_cast<BlockedClientCategory>(i)];
+      auto itr = category_map.find(client_id_);
+      if (itr != category_map.end() && itr->second.cnt == 0) {
+        released.push_back(itr->second.blocked_client);
+        category_map.erase(itr);
+      }
+    }
+  }
+  for (auto *blocked_client : released) {
+    ValkeyModule_BlockedClientMeasureTimeEnd(blocked_client);
+    ValkeyModule_UnblockClient(blocked_client, nullptr);
+  }
 }
 
 void BlockedClient::MeasureTimeStart() {
