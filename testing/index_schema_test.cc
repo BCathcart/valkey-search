@@ -777,6 +777,9 @@ TEST_F(IndexSchemaSubscriptionSimpleTest,
 
   KeyspaceEventManager::Instance().NotifySubscribers(
       &fake_ctx_, VALKEYMODULE_NOTIFY_HASH, "event", key_valkey_str.get());
+  EXPECT_EQ(vmsdk::BlockedClientTracker::GetInstance().GetClientCount(
+                vmsdk::BlockedClientCategory::kHash),
+            0);
 }
 
 TEST_F(IndexSchemaSubscriptionSimpleTest, EmptyKeyPrefixesTest) {

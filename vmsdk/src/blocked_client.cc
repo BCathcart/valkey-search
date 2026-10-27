@@ -138,6 +138,7 @@ BlockedClientHold::BlockedClientHold(ValkeyModuleCtx *ctx)
     return;
   }
   absl::MutexLock lock(&blocked_clients_mutex);
+  DCHECK_EQ(held_client_id, 0ULL);
   held_client_id = client_id_;
 }
 
