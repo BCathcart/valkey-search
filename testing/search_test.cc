@@ -2764,17 +2764,23 @@ ABSL_NO_THREAD_SAFETY_ANALYSIS {
   EXPECT_LE(counting->polls, 2 + kCap + 1);
 }
 
+// A document for ScoreTextQueryTestBase::BuildTextTagSchema. An empty color
+// leaves the doc untracked by the tag index; the default rating sits inside
+// [0 100] and outside [500 600], the ranges the tests filter on.
+struct ScoreDoc {
+  std::string key;
+  std::string text;
+  std::string color;
+  std::string rating = "50";
+};
+
 class ScoreTextQueryTestBase : public ValkeySearchTest {
  protected:
   // Schema with a text field "text", a case-insensitive tag field "color", and
   // a numeric field "rating", so ScoreTextQuery sees real posting lists and a
-  // non-zero corpus. Each doc is (key, text, color); an empty color leaves the
-  // doc untracked by the tag index, and the numeric field needs no records
-  // (ScoreNode's numeric case returns 0 without touching the index).
+  // non-zero corpus.
   std::shared_ptr<MockIndexSchema> BuildTextTagSchema(
-      const std::vector<std::tuple<std::string, std::string, std::string>>
-          &docs,
-      bool no_stem = true) {
+      const std::vector<ScoreDoc> &docs, bool no_stem = true) {
     auto schema = CreateIndexSchema(kIndexSchemaName).value();
     EXPECT_CALL(*schema, GetIdentifier(::testing::_))
         .Times(::testing::AnyNumber());
@@ -2787,13 +2793,10 @@ class ScoreTextQueryTestBase : public ValkeySearchTest {
     auto tag = std::make_shared<indexes::Tag>(
         CreateTagIndexProto(/*separator=*/",", /*case_sensitive=*/false));
     VMSDK_EXPECT_OK(schema->AddIndex("color", "color", tag));
-    // A numeric field so text+numeric composition can be scored. ScoreNode's
-    // kNumeric case returns 0 without touching the index (the pre-filter admits
-    // range membership), so the numeric index needs no records for scoring.
     auto numeric =
         std::make_shared<indexes::Numeric>(CreateNumericIndexProto());
     VMSDK_EXPECT_OK(schema->AddIndex("rating", "rating", numeric));
-    for (const auto &[k, content, color] : docs) {
+    for (const auto &[k, content, color, rating] : docs) {
       auto key = StringInternStore::Intern(k);
       VMSDK_EXPECT_OK(text->AddRecord(
           key, AttributeData(vmsdk::MakeUniqueValkeyString(content))));
@@ -2802,6 +2805,8 @@ class ScoreTextQueryTestBase : public ValkeySearchTest {
         VMSDK_EXPECT_OK(tag->AddRecord(
             key, AttributeData(vmsdk::MakeUniqueValkeyString(color))));
       }
+      VMSDK_EXPECT_OK(numeric->AddRecord(
+          key, AttributeData(vmsdk::MakeUniqueValkeyString(rating))));
       schema->SetIndexMutationSequenceNumber(key, 0);
     }
     return schema;
@@ -2827,8 +2832,9 @@ class ScoreTextQueryTestBase : public ValkeySearchTest {
   }
 
   // Schema with two TEXT fields ("title" stems, "body" is NOSTEM) sharing one
-  // posting tree, plus a numeric field "rating" so combined text+numeric
-  // queries parse. Docs are (key, title, body); "" skips that field.
+  // posting tree, plus a numeric field "rating" (every doc rates 50) so
+  // combined text+numeric queries parse and match. Docs are (key, title,
+  // body); "" skips that field.
   std::shared_ptr<MockIndexSchema> BuildTwoTextFieldSchema(
       const std::vector<std::tuple<std::string, std::string, std::string>>
           &docs) {
@@ -2859,6 +2865,8 @@ class ScoreTextQueryTestBase : public ValkeySearchTest {
             key, AttributeData(vmsdk::MakeUniqueValkeyString(body_text))));
       }
       text_schema->CommitKeyData(key);
+      VMSDK_EXPECT_OK(numeric->AddRecord(
+          key, AttributeData(vmsdk::MakeUniqueValkeyString("50"))));
       schema->SetIndexMutationSequenceNumber(key, 0);
     }
     return schema;
@@ -2886,12 +2894,11 @@ class ScoreTextQueryTestBase : public ValkeySearchTest {
   }
 
   // Main-thread recompute of `key` for `filter`, as VerifyFilter does for a
-  // mutated document: a fresh main-thread context, no time-sliced lock, tag
-  // membership from `record_tags` (field identifier -> tag string).
+  // mutated document: a fresh main-thread context, no time-sliced lock, tag and
+  // numeric membership from `record` (field identifier -> value).
   std::optional<float> Recompute(
       MockIndexSchema &schema, absl::string_view filter, const std::string &key,
-      const std::vector<std::pair<std::string, std::string>> &record_tags =
-          {}) {
+      const std::vector<std::pair<std::string, std::string>> &record = {}) {
     TextParsingOptions options{};
     auto parsed = FilterParser(schema, filter, options).Parse();
     EXPECT_TRUE(parsed.ok()) << parsed.status();
@@ -2899,7 +2906,7 @@ class ScoreTextQueryTestBase : public ValkeySearchTest {
         indexes::scoring::GetScorer(indexes::scoring::ScorerType::kBm25Std);
     query::QueryContext query_ctx(schema, scorer, query::LockMode::kShortLocks);
     RecordsMap records;
-    for (const auto &[field, value] : record_tags) {
+    for (const auto &[field, value] : record) {
       records.emplace(field,
                       RecordsMapValue(vmsdk::MakeUniqueValkeyString(field),
                                       vmsdk::MakeUniqueValkeyString(value)));
@@ -2946,11 +2953,10 @@ class ScoreTextQueryTestBase : public ValkeySearchTest {
 // `expected` receives the baseline scores in the order they appear in
 // `baselines`. Optional `zero_score_keys` asserts the filter retains those
 // keys (already admitted by the pre-filter, but re-deriving a non-match here)
-// with a zero score rather than dropping them. Docs are (key, text, color);
-// pass "" for either field a case does not use.
+// with a zero score rather than dropping them.
 struct ScoreCase {
   std::string test_name;
-  std::vector<std::tuple<std::string, std::string, std::string>> docs;
+  std::vector<ScoreDoc> docs;
   std::string key;
   std::vector<std::string> baselines;
   std::string filter;
@@ -3040,15 +3046,15 @@ INSTANTIATE_TEST_SUITE_P(
          .baselines = {"@text:hello"},
          .filter = "@text:hello -@text:missing",
          .expected = [](const auto &b) { return b[0]; }},
-        // Same, even for a doc that contains the negated term: candidate
-        // filtering happens before scoring, so ScoreNode still adds zero for
-        // the negation.
-        {.test_name = "NegateDoesNotInflateEnclosingAnd",
+        // A doc that contains the negated term re-derives a non-match here and
+        // is retained with a zero score, like any other failed AND child.
+        {.test_name = "NegateFailsForDocCarryingTheTerm",
          .docs = {{"key1", "hello world", ""}, {"key2", "hello there", ""}},
-         .key = "key2",
+         .key = "key1",
          .baselines = {"@text:hello"},
          .filter = "@text:hello -@text:there",
-         .expected = [](const auto &b) { return b[0]; }},
+         .expected = [](const auto &b) { return b[0]; },
+         .zero_score_keys = {"key2"}},
 
         // --- Numeric: a filter, never a ranker (contributes 0) ---
         // Adding a numeric clause to a text query changes nothing.
@@ -3108,6 +3114,77 @@ INSTANTIATE_TEST_SUITE_P(
          .baselines = {"@color:{re*}"},
          .filter = "@color:{re*|RE*}",
          .expected = [](const auto &b) { return b[0]; }},
+
+        // --- An AND under an OR scores only if the doc passes every child ---
+        // k1 carries the text of both branches but fails the filter leaf, so
+        // only the bare text branch may score, in either branch order.
+        {.test_name = "OrFilteredAndTagMissFirst",
+         .docs = {{"k1", "apple banana", "red"}, {"k2", "apple", "blue"}},
+         .key = "k1",
+         .baselines = {"@text:apple"},
+         .filter = "(@text:banana @color:{blue}) | @text:apple",
+         .expected = [](const auto &b) { return b[0]; }},
+        {.test_name = "OrFilteredAndTagMissLast",
+         .docs = {{"k1", "apple banana", "red"}, {"k2", "apple", "blue"}},
+         .key = "k1",
+         .baselines = {"@text:apple"},
+         .filter = "@text:apple | (@text:banana @color:{blue})",
+         .expected = [](const auto &b) { return b[0]; }},
+        {.test_name = "OrFilteredAndTagMissUntrackedDoc",
+         .docs = {{"k1", "apple banana", ""}, {"k2", "apple", "blue"}},
+         .key = "k1",
+         .baselines = {"@text:apple"},
+         .filter = "(@text:banana @color:{blue}) | @text:apple",
+         .expected = [](const auto &b) { return b[0]; }},
+        {.test_name = "OrFilteredAndTagMissUnknownValue",
+         .docs = {{"k1", "apple banana", "red"}, {"k2", "apple", "blue"}},
+         .key = "k1",
+         .baselines = {"@text:apple"},
+         .filter = "(@text:banana @color:{green}) | @text:apple",
+         .expected = [](const auto &b) { return b[0]; }},
+        {.test_name = "OrFilteredAndTagPrefixMiss",
+         .docs = {{"k1", "apple banana", "red"}, {"k2", "apple", "blue"}},
+         .key = "k1",
+         .baselines = {"@text:apple"},
+         .filter = "(@text:banana @color:{bl*}) | @text:apple",
+         .expected = [](const auto &b) { return b[0]; }},
+        {.test_name = "OrFilteredAndNumericMissFirst",
+         .docs = {{"k1", "apple banana", "", "50"}, {"k2", "apple", "", "5"}},
+         .key = "k1",
+         .baselines = {"@text:apple"},
+         .filter = "(@text:banana @rating:[0 10]) | @text:apple",
+         .expected = [](const auto &b) { return b[0]; }},
+        {.test_name = "OrFilteredAndNumericMissLast",
+         .docs = {{"k1", "apple banana", "", "50"}, {"k2", "apple", "", "5"}},
+         .key = "k1",
+         .baselines = {"@text:apple"},
+         .filter = "@text:apple | (@text:banana @rating:[0 10])",
+         .expected = [](const auto &b) { return b[0]; }},
+        {.test_name = "OrFilteredAndNegateMissFirst",
+         .docs = {{"k1", "apple banana", ""}, {"k2", "apple", ""}},
+         .key = "k1",
+         .baselines = {"@text:apple"},
+         .filter = "(@text:banana -@text:apple) | @text:apple",
+         .expected = [](const auto &b) { return b[0]; }},
+        {.test_name = "OrFilteredAndNegateMissLast",
+         .docs = {{"k1", "apple banana", ""}, {"k2", "apple", ""}},
+         .key = "k1",
+         .baselines = {"@text:apple"},
+         .filter = "@text:apple | (@text:banana -@text:apple)",
+         .expected = [](const auto &b) { return b[0]; }},
+        // The same AND scores when the doc passes its filter leaf.
+        {.test_name = "OrFilteredAndNumericHitScoresBothBranches",
+         .docs = {{"k1", "apple banana", "", "50"}, {"k2", "apple", "", "5"}},
+         .key = "k1",
+         .baselines = {"@text:apple", "@text:banana"},
+         .filter = "(@text:banana @rating:[0 100]) | @text:apple",
+         .expected = [](const auto &b) { return b[0] + b[1]; }},
+        {.test_name = "OrFilteredAndTagHitScoresBothBranches",
+         .docs = {{"k1", "apple banana", "red"}, {"k2", "apple", "blue"}},
+         .key = "k1",
+         .baselines = {"@text:apple", "@text:banana", "@color:{red}"},
+         .filter = "(@text:banana @color:{red}) | @text:apple",
+         .expected = [](const auto &b) { return b[0] + b[1] + b[2]; }},
     }),
     [](const TestParamInfo<ScoreCase> &info) { return info.param.test_name; });
 
@@ -3248,7 +3325,8 @@ TEST_F(ScoreTextQueryTestBase, RecomputePathMatchesExtraStepAtNonZero) {
   ASSERT_TRUE(extra_step.has_value());
   EXPECT_GT(*extra_step, 0.0f);
 
-  auto recomputed = Recompute(*schema, filter, "d1", {{"color", "red"}});
+  auto recomputed =
+      Recompute(*schema, filter, "d1", {{"color", "red"}, {"rating", "50"}});
   ASSERT_TRUE(recomputed.has_value());
   EXPECT_FLOAT_EQ(*recomputed, *extra_step);
 }
@@ -3267,15 +3345,58 @@ TEST_F(ScoreTextQueryTestBase, RecomputeScoresTagsFromRecord) {
   ASSERT_TRUE(text_only && indexed);
 
   // Record still says red: matches the index.
-  EXPECT_FLOAT_EQ(*Recompute(*schema, filter, "d1", {{"color", "red"}}),
-                  *indexed);
+  EXPECT_FLOAT_EQ(
+      *Recompute(*schema, filter, "d1", {{"color", "red"}, {"rating", "50"}}),
+      *indexed);
   // Record now says blue: blue's (lower) IDF is credited instead of red's.
-  auto as_blue = Recompute(*schema, filter, "d1", {{"color", "blue"}});
+  auto as_blue =
+      Recompute(*schema, filter, "d1", {{"color", "blue"}, {"rating", "50"}});
   ASSERT_TRUE(as_blue);
   EXPECT_GT(*as_blue, *text_only);
   EXPECT_LT(*as_blue, *indexed);
-  // Record dropped the field: the tag leaf contributes nothing.
-  EXPECT_FLOAT_EQ(*Recompute(*schema, filter, "d1"), *text_only);
+  // Record dropped the field: the tag leaf no longer matches.
+  EXPECT_EQ(Recompute(*schema, filter, "d1", {{"rating", "50"}}), std::nullopt);
+}
+
+// Numeric membership on the recompute path comes from the fetched record too:
+// a value that left the range, or a dropped or unparsable field, fails the
+// leaf.
+TEST_F(ScoreTextQueryTestBase, RecomputeChecksNumericFromRecord) {
+  auto schema = BuildTextTagSchema({{"d1", "hello world", ""}});
+  const std::string filter = "@text:hello @rating:[0 100]";
+  auto indexed = Score(*schema, filter, "d1");
+  ASSERT_TRUE(indexed);
+
+  EXPECT_FLOAT_EQ(*Recompute(*schema, filter, "d1", {{"rating", "99"}}),
+                  *indexed);
+  EXPECT_EQ(Recompute(*schema, filter, "d1", {{"rating", "101"}}),
+            std::nullopt);
+  EXPECT_EQ(Recompute(*schema, filter, "d1", {{"rating", "many"}}),
+            std::nullopt);
+  EXPECT_EQ(Recompute(*schema, filter, "d1"), std::nullopt);
+}
+
+// The OR-of-filtered-AND shape on the recompute path: the record decides
+// whether the AND branch scores, and the bare text branch always does.
+TEST_F(ScoreTextQueryTestBase, RecomputeOrFilteredAndFollowsRecord) {
+  auto schema = BuildTextTagSchema(
+      {{"k1", "apple banana", "red"}, {"k2", "apple", "blue", "5"}});
+  auto apple = Score(*schema, "@text:apple", "k1");
+  auto banana = Score(*schema, "@text:banana", "k1");
+  ASSERT_TRUE(apple && banana);
+
+  const std::string numeric = "(@text:banana @rating:[0 10]) | @text:apple";
+  EXPECT_FLOAT_EQ(*Recompute(*schema, numeric, "k1", {{"rating", "50"}}),
+                  *apple);
+  EXPECT_FLOAT_EQ(*Recompute(*schema, numeric, "k1", {{"rating", "7"}}),
+                  *apple + *banana);
+
+  const std::string tag = "(@text:banana @color:{blue}) | @text:apple";
+  EXPECT_FLOAT_EQ(*Recompute(*schema, tag, "k1", {{"color", "red"}}), *apple);
+  EXPECT_FLOAT_EQ(*Recompute(*schema, tag, "k1"), *apple);
+  auto as_blue = Recompute(*schema, tag, "k1", {{"color", "blue"}});
+  ASSERT_TRUE(as_blue);
+  EXPECT_GT(*as_blue, *apple + *banana);
 }
 
 // A query that omits SCORER picks up the `default-scorer` config.
@@ -3367,16 +3488,10 @@ TEST_F(ScoreTextQueryTestBase, StemRecomputePathMatchesExtraStep) {
 // A stemmed term under an OR next to a numeric filter is checked one key at a
 // time; a key holding only another form of the word must still match.
 TEST_F(ScoreTextQueryTestBase, StemInflectionMatchesInPerKeyOr) {
-  auto schema = BuildTextTagSchema(
-      {{"d1", "orange", ""}, {"d2", "listening", ""}, {"d3", "orange", ""}},
-      /*no_stem=*/false);
-  auto rating = schema->GetIndex("rating").value();
-  for (const auto &[k, v] : {std::pair{"d1", "100"}, std::pair{"d2", "100"},
-                             std::pair{"d3", "200"}}) {
-    VMSDK_EXPECT_OK(
-        rating->AddRecord(StringInternStore::Intern(k),
-                          AttributeData(vmsdk::MakeUniqueValkeyString(v))));
-  }
+  auto schema = BuildTextTagSchema({{"d1", "orange", "", "100"},
+                                    {"d2", "listening", "", "100"},
+                                    {"d3", "orange", "", "200"}},
+                                   /*no_stem=*/false);
   auto parsed =
       FilterParser(*schema, "(@text:oranges | @text:listened) @rating:[97 137]",
                    TextParsingOptions{})
@@ -3504,8 +3619,8 @@ TEST_F(ScoreTextQueryTestBase, FieldScopedRecomputePathAgrees) {
   const std::string filter = "@body:hello @rating:[0 100]";
   // A non-match is nullopt (the caller owns the keep-or-drop decision); the
   // field-scoped leaf must reject d1.
-  EXPECT_FALSE(Recompute(*schema, filter, "d1"));
-  auto recomputed = Recompute(*schema, filter, "d2");
+  EXPECT_FALSE(Recompute(*schema, filter, "d1", {{"rating", "50"}}));
+  auto recomputed = Recompute(*schema, filter, "d2", {{"rating", "50"}});
   auto extra_step = Score(*schema, filter, "d2");
   ASSERT_TRUE(recomputed && extra_step);
   EXPECT_FLOAT_EQ(*recomputed, *extra_step);
@@ -3854,7 +3969,7 @@ TEST_F(ScoreTextQueryTestBase, ExpansionRepresentativeSuffixAndFuzzy) {
 // per term leaf per query, however many candidates there are. Stemming is on so
 // the leaf carries every group kind.
 TEST_F(ScoreTextQueryTestBase, TermLeavesWalkTreesOncePerQuery) {
-  std::vector<std::tuple<std::string, std::string, std::string>> docs;
+  std::vector<ScoreDoc> docs;
   for (int i = 0; i < 100; ++i) {
     docs.push_back({absl::StrCat("d", i),
                     i % 2 ? "running fast" : "she runs the race", ""});
@@ -3921,7 +4036,7 @@ TEST_F(ScoreTextQueryTestBase, EvaluateFullRefetchesPerKeyTreeForEachKey) {
 // query and answers every candidate from the cached bag, for filtering and
 // scoring alike.
 TEST_F(ScoreTextQueryTestBase, TagValuesLookedUpOncePerQuery) {
-  std::vector<std::tuple<std::string, std::string, std::string>> docs;
+  std::vector<ScoreDoc> docs;
   for (int i = 0; i < 100; ++i) {
     docs.push_back({absl::StrCat("d", i), "hello", i % 2 ? "red" : "blue"});
   }
@@ -3968,8 +4083,8 @@ TEST_F(ScoreTextQueryTestBase, MainThreadLockModesMatchBackground) {
       },
       /*no_stem=*/false);
   // Tag leaves are excluded: main-thread tag membership comes from the fetched
-  // record, exercised through VerifyFilter. The numeric index holds no records,
-  // so the negated range is what lets the verdict be true. INORDER and SLOP
+  // record, exercised through VerifyFilter. Every rating is outside the negated
+  // range, so it is what lets the verdict be true. INORDER and SLOP
   // make every text leaf positional, so they also cover the per-key position
   // merge on both paths.
   const TextParsingOptions plain{};
