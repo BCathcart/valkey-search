@@ -106,17 +106,8 @@ class PredicateEvaluator : public query::Evaluator {
 
   EvaluationResult EvaluateNumeric(
       const query::NumericPredicate &predicate) override {
-    auto identifier = predicate.GetRetainedIdentifier();
-    auto it = records_.find(vmsdk::ToStringView(identifier.get()));
-    if (it == records_.end()) {
-      return EvaluationResult(false);
-    }
-    auto out_numeric =
-        vmsdk::To<double>(vmsdk::ToStringView(it->second.value.get()));
-    if (!out_numeric.ok()) {
-      return EvaluationResult(false);
-    }
-    return predicate.Evaluate(&out_numeric.value());
+    auto value = ReadRecordNumeric(records_, predicate);
+    return predicate.Evaluate(value ? &*value : nullptr);
   }
 
   EvaluationResult EvaluateText(const query::TextPredicate &predicate,

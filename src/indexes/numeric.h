@@ -67,8 +67,11 @@ class Numeric : public IndexBase {
 
   uint32_t GetMutationWeight() const override;
 
-  const double *GetValue(const InternedStringPtr &key) const
+  const double *GetValue(BorrowedInternedStringPtr key) const
       ABSL_NO_THREAD_SAFETY_ANALYSIS;
+  const double *GetValue(const InternedStringPtr &key) const {
+    return GetValue(BorrowedInternedStringPtr(key));
+  }
   using TreeType = utils::NumericBTree;
   using TreeIterator = TreeType::Iterator;
   using KeySet = BagOfInternedStringPtrs;

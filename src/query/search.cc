@@ -1382,7 +1382,8 @@ float SanitizeScore(float score) {
 // Per-document scoring state around the query-scoped context.
 struct ScoreContext {
   QueryContext &query_ctx;
-  // Main thread only: the fetched record, which supplies tag membership.
+  // Main thread only: the fetched record, which supplies tag and numeric
+  // membership.
   const RecordsMap *records = nullptr;
 
   // The current document's own tree, fetched on the first expansion leaf that
@@ -1500,14 +1501,23 @@ std::optional<float> ScoreNode(const Predicate *predicate,
       }
       return matched ? std::optional<float>(total) : std::nullopt;
     }
-    // A numeric range match is a filter, never a ranker: it carries no IDF, no
-    // term frequency, and no doc-length component, so under BM25STD it
-    // contributes nothing (Redis reports "Irrelevant token -> score is 0").
-    // Returning 0 leaves ordering unchanged whether or not a numeric clause is
-    // present — a numeric candidate only reaches here because the pre-filter
-    // admitted it, so there is no nullopt (non-match) path.
-    case PredicateType::kNumeric:
+    // A numeric range is a filter, never a ranker: no idf, term frequency or
+    // doc-length component, so a match contributes 0 (Redis: "Irrelevant
+    // token -> score is 0"). Membership is still re-derived so that a leaf the
+    // document fails does not let its AND siblings score under an OR.
+    case PredicateType::kNumeric: {
+      const auto *numeric = static_cast<const NumericPredicate *>(predicate);
+      std::optional<double> record_value;
+      const double *value = nullptr;
+      if (score_ctx.records != nullptr) {
+        record_value = ReadRecordNumeric(*score_ctx.records, *numeric);
+        if (record_value) value = &*record_value;
+      } else {
+        value = numeric->GetIndex()->GetValue(key);
+      }
+      if (!numeric->Evaluate(value).matches) return std::nullopt;
       return 0.0f;
+    }
     // A tag value is scored as a BM25 term with F ≡ 1 (term frequency is not
     // counted): IDF over the per-tag-value document count, normalized by the
     // document's TEXT length, honoring $weight. A union (`{red|blue}`) sums the
@@ -1517,7 +1527,11 @@ std::optional<float> ScoreNode(const Predicate *predicate,
     case PredicateType::kTag: {
       const auto &leaf =
           std::get<TagLeaf>(score_ctx.query_ctx.GetOrResolve(predicate));
-      if (leaf.tag_values.empty() && leaf.tag_prefixes.empty()) return 0.0f;
+      // Every queried value is absent from the index, so no document carries
+      // one.
+      if (leaf.tag_values.empty() && leaf.tag_prefixes.empty()) {
+        return std::nullopt;
+      }
       const auto *tag_pred = static_cast<const TagPredicate *>(predicate);
       const indexes::Tag *tag_index = tag_pred->GetIndex();
 
@@ -1528,7 +1542,7 @@ std::optional<float> ScoreNode(const Predicate *predicate,
       std::optional<absl::flat_hash_set<absl::string_view>> doc_tags;
       if (score_ctx.records != nullptr) {
         doc_tags = ReadRecordTags(*score_ctx.records, *tag_pred);
-        if (!doc_tags) return 0.0f;
+        if (!doc_tags) return std::nullopt;
       }
       const bool case_sensitive = tag_index->IsCaseSensitive();
       auto carries = [&](const TagLeaf::Value &value) {
@@ -1543,10 +1557,11 @@ std::optional<float> ScoreNode(const Predicate *predicate,
       };
 
       // Sum the BM25 term (F ≡ 1) for each resolved value the document carries.
-      // An untracked key is in no bag and scores 0.
       float sum = 0.0f;
+      bool matched = false;
       for (const auto &value : leaf.tag_values) {
         if (!carries(value)) continue;
+        matched = true;
         sum += score_ctx.query_ctx.ScoreLeaf(
             {.idf = value.idf,
              .term_frequency = 1,
@@ -1559,19 +1574,29 @@ std::optional<float> ScoreNode(const Predicate *predicate,
         const size_t dt =
             score_ctx.query_ctx.TagPrefixDocCount(*tag_index, prefix, key);
         if (dt == 0) continue;
+        matched = true;
         sum += score_ctx.query_ctx.ScoreLeaf(
             {.idf = score_ctx.query_ctx.Idf(dt),
              .term_frequency = 1,
              .doc_len = doc_len,
              .leaf_weight = predicate->GetWeight()});
       }
-      return sum;
+      return matched ? std::optional<float>(sum) : std::nullopt;
     }
-    // Vector range and negate are filters; they never affect text relevance.
+    // Negation is a filter: a match contributes 0, and the document matches
+    // only if the child does not. A vector range child's membership is not
+    // re-derived here (kVectorRange below), so the pre-filter's verdict is
+    // kept for it.
+    case PredicateType::kNegate: {
+      const auto *child =
+          static_cast<const NegatePredicate *>(predicate)->GetPredicate();
+      if (CountVectorRangePredicates(child) > 0) return 0.0f;
+      if (ScoreNode(child, key, score_ctx)) return std::nullopt;
+      return 0.0f;
+    }
+    // Vector range is a filter the pre-filter has already applied; kNone has
+    // no term occurrence to score. Neither contributes to relevance.
     case PredicateType::kVectorRange:
-    // kNegate is a filter already applied by the pre-filter, and kNone has no
-    // term occurrence to score; neither contributes to relevance.
-    case PredicateType::kNegate:
     case PredicateType::kNone:
       return 0.0f;
   }
@@ -1673,6 +1698,17 @@ std::optional<absl::flat_hash_set<absl::string_view>> ReadRecordTags(
   return indexes::Tag::ParseRecordTags(
       vmsdk::ToStringView(record->second.value.get()),
       predicate.GetIndex()->GetSeparator());
+}
+
+std::optional<double> ReadRecordNumeric(const RecordsMap &records,
+                                        const NumericPredicate &predicate) {
+  auto record = records.find(
+      vmsdk::ToStringView(predicate.GetRetainedIdentifier().get()));
+  if (record == records.end()) return std::nullopt;
+  auto value =
+      vmsdk::To<double>(vmsdk::ToStringView(record->second.value.get()));
+  if (!value.ok()) return std::nullopt;
+  return *value;
 }
 
 std::optional<float> RecomputeDocumentScore(const Predicate *root_predicate,

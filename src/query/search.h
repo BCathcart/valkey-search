@@ -529,6 +529,11 @@ void ScoreTextQuery(const Predicate *root_predicate,
 std::optional<absl::flat_hash_set<absl::string_view>> ReadRecordTags(
     const RecordsMap &records, const TagPredicate &predicate);
 
+// The numeric analogue: the record's value for the predicate's field. nullopt
+// when the record has no such field or it does not parse as a number.
+std::optional<double> ReadRecordNumeric(const RecordsMap &records,
+                                        const NumericPredicate &predicate);
+
 // Main-thread rescoring of one revalidated document, through the same ScoreNode
 // walk ScoreTextQuery runs so the result is on the shard-side scale.
 // `query_ctx` must be in kShortLocks: this runs outside any time-sliced read
