@@ -1379,31 +1379,56 @@ float SanitizeScore(float score) {
   return indexes::scoring::IsNaN(score) ? 0.0f : score;
 }
 
+// The fetched record's value for `identifier`; nullopt when it has no such
+// field.
+std::optional<absl::string_view> RecordField(const RecordsMap &records,
+                                             absl::string_view identifier) {
+  auto record = records.find(identifier);
+  if (record == records.end()) return std::nullopt;
+  return vmsdk::ToStringView(record->second.value.get());
+}
+
 // Per-document scoring state around the query-scoped context.
 struct ScoreContext {
   QueryContext &query_ctx;
-  // Main thread only: the fetched record, which supplies tag and numeric
-  // membership.
+  // Filter leaves and negations are judged by the evaluator that filtered the
+  // document, never re-derived here: `prefilter` in the read phase (index
+  // state, bound to a key per call), `evaluator` on the main thread (bound to
+  // its one document, judging the fetched record).
+  indexes::PrefilterEvaluator *prefilter = nullptr;
+  Evaluator *evaluator = nullptr;
+  // Main thread only: the fetched record, whose tags are the ones scored.
   const RecordsMap *records = nullptr;
 
-  // The current document's own tree, fetched on the first expansion leaf that
-  // misses its representative and reused by the rest of that document's walk.
-  struct PerKeyIndex {
-    InternedStringPtr key;
-    const indexes::text::TextIndex *index = nullptr;
-    bool fetched = false;
-  };
-  PerKeyIndex per_key;
+  // The current document, owned once something needs it as an
+  // InternedStringPtr, and its own tree, fetched on the first expansion leaf
+  // that misses its representative.
+  InternedStringPtr key;
+  const indexes::text::TextIndex *index = nullptr;
+  bool index_fetched = false;
 
-  void BeginDocument() { per_key = {}; }
+  void BeginDocument() {
+    key = nullptr;
+    index = nullptr;
+    index_fetched = false;
+  }
+  const InternedStringPtr &Key(BorrowedInternedStringPtr borrowed) {
+    if (!key) key = borrowed.Materialize();
+    return key;
+  }
   const indexes::text::TextIndex *PerKeyTextIndex(
-      BorrowedInternedStringPtr key) {
-    if (!per_key.fetched) {
-      per_key.fetched = true;
-      per_key.key = key.Materialize();
-      per_key.index = query_ctx.PerKeyTextIndex(per_key.key);
+      BorrowedInternedStringPtr borrowed) {
+    if (!index_fetched) {
+      index_fetched = true;
+      index = query_ctx.PerKeyTextIndex(Key(borrowed));
     }
-    return per_key.index;
+    return index;
+  }
+  bool Matches(const Predicate &predicate, BorrowedInternedStringPtr borrowed) {
+    if (prefilter != nullptr) {
+      return prefilter->Evaluate(predicate, Key(borrowed));
+    }
+    return predicate.Evaluate(*evaluator).matches;
   }
 };
 
@@ -1464,7 +1489,7 @@ std::optional<float> ScoreNode(const Predicate *predicate,
         if (per_key_index == nullptr) return std::nullopt;
         auto match = score_ctx.query_ctx.FindExpansionMatch(
             *expansion, *static_cast<const ExpansionPredicate *>(predicate),
-            *per_key_index, score_ctx.per_key.key);
+            *per_key_index, score_ctx.Key(key));
         if (!match) return std::nullopt;
         return score_ctx.query_ctx.ScoreLeaf(
             {.idf = match->idf,
@@ -1501,23 +1526,13 @@ std::optional<float> ScoreNode(const Predicate *predicate,
       }
       return matched ? std::optional<float>(total) : std::nullopt;
     }
-    // A numeric range is a filter, never a ranker: no idf, term frequency or
-    // doc-length component, so a match contributes 0 (Redis: "Irrelevant
-    // token -> score is 0"). Membership is still re-derived so that a leaf the
-    // document fails does not let its AND siblings score under an OR.
-    case PredicateType::kNumeric: {
-      const auto *numeric = static_cast<const NumericPredicate *>(predicate);
-      std::optional<double> record_value;
-      const double *value = nullptr;
-      if (score_ctx.records != nullptr) {
-        record_value = ReadRecordNumeric(*score_ctx.records, *numeric);
-        if (record_value) value = &*record_value;
-      } else {
-        value = numeric->GetIndex()->GetValue(key);
-      }
-      if (!numeric->Evaluate(value).matches) return std::nullopt;
+    // Numeric ranges and negations are filters, never rankers: a match
+    // contributes 0 (Redis: "Irrelevant token -> score is 0") and a non-match
+    // drops the enclosing AND, which matters under an OR.
+    case PredicateType::kNumeric:
+    case PredicateType::kNegate:
+      if (!score_ctx.Matches(*predicate, key)) return std::nullopt;
       return 0.0f;
-    }
     // A tag value is scored as a BM25 term with F ≡ 1 (term frequency is not
     // counted): IDF over the per-tag-value document count, normalized by the
     // document's TEXT length, honoring $weight. A union (`{red|blue}`) sums the
@@ -1525,29 +1540,30 @@ std::optional<float> ScoreNode(const Predicate *predicate,
     // come from the index's TEXT field; on a text-less index avg_doc_len is 0
     // and ScoreLeaf returns 0 (a well-defined score, not Redis's nan).
     case PredicateType::kTag: {
+      if (!score_ctx.Matches(*predicate, key)) return std::nullopt;
       const auto &leaf =
           std::get<TagLeaf>(score_ctx.query_ctx.GetOrResolve(predicate));
-      // Every queried value is absent from the index, so no document carries
-      // one.
-      if (leaf.tag_values.empty() && leaf.tag_prefixes.empty()) {
-        return std::nullopt;
-      }
       const auto *tag_pred = static_cast<const TagPredicate *>(predicate);
       const indexes::Tag *tag_index = tag_pred->GetIndex();
 
       const uint32_t doc_len = score_ctx.query_ctx.DocLen(key);
 
-      // Membership from the bag in the read phase, from the fetched record's
-      // tags on the main thread (TagLeaf::Value).
-      std::optional<absl::flat_hash_set<absl::string_view>> doc_tags;
+      // The values credited are those the document carries: per the index's
+      // bags in the read phase, per the fetched record on the main thread,
+      // where the index may not reflect the mutation yet. A value the index
+      // has not resolved (TagLeaf drops dt == 0) is matched but worth 0.
+      absl::string_view record_tags;
+      absl::flat_hash_set<absl::string_view> doc_tags;
       if (score_ctx.records != nullptr) {
-        doc_tags = ReadRecordTags(*score_ctx.records, *tag_pred);
-        if (!doc_tags) return std::nullopt;
+        record_tags = RecordField(*score_ctx.records, tag_pred->GetIdentifier())
+                          .value_or("");
+        doc_tags = indexes::Tag::ParseRecordTags(record_tags,
+                                                 tag_index->GetSeparator());
       }
       const bool case_sensitive = tag_index->IsCaseSensitive();
       auto carries = [&](const TagLeaf::Value &value) {
-        if (!doc_tags) return value.bag->contains(key);
-        for (absl::string_view tag : *doc_tags) {
+        if (score_ctx.records == nullptr) return value.bag->contains(key);
+        for (absl::string_view tag : doc_tags) {
           if (case_sensitive ? tag == value.value
                              : absl::EqualsIgnoreCase(tag, value.value)) {
             return true;
@@ -1558,10 +1574,8 @@ std::optional<float> ScoreNode(const Predicate *predicate,
 
       // Sum the BM25 term (F ≡ 1) for each resolved value the document carries.
       float sum = 0.0f;
-      bool matched = false;
       for (const auto &value : leaf.tag_values) {
         if (!carries(value)) continue;
-        matched = true;
         sum += score_ctx.query_ctx.ScoreLeaf(
             {.idf = value.idf,
              .term_frequency = 1,
@@ -1571,31 +1585,23 @@ std::optional<float> ScoreNode(const Predicate *predicate,
       // Each prefix contributes ONE matched value (the doc's first), never the
       // sum; a union still sums.
       for (absl::string_view prefix : leaf.tag_prefixes) {
-        const size_t dt =
-            score_ctx.query_ctx.TagPrefixDocCount(*tag_index, prefix, key);
+        const size_t dt = score_ctx.records != nullptr
+                              ? score_ctx.query_ctx.TagPrefixDocCount(
+                                    *tag_index, prefix, record_tags)
+                              : score_ctx.query_ctx.TagPrefixDocCount(
+                                    *tag_index, prefix, key);
         if (dt == 0) continue;
-        matched = true;
         sum += score_ctx.query_ctx.ScoreLeaf(
             {.idf = score_ctx.query_ctx.Idf(dt),
              .term_frequency = 1,
              .doc_len = doc_len,
              .leaf_weight = predicate->GetWeight()});
       }
-      return matched ? std::optional<float>(sum) : std::nullopt;
+      return sum;
     }
-    // Negation is a filter: a match contributes 0, and the document matches
-    // only if the child does not. A vector range child's membership is not
-    // re-derived here (kVectorRange below), so the pre-filter's verdict is
-    // kept for it.
-    case PredicateType::kNegate: {
-      const auto *child =
-          static_cast<const NegatePredicate *>(predicate)->GetPredicate();
-      if (CountVectorRangePredicates(child) > 0) return 0.0f;
-      if (ScoreNode(child, key, score_ctx)) return std::nullopt;
-      return 0.0f;
-    }
-    // Vector range is a filter the pre-filter has already applied; kNone has
-    // no term occurrence to score. Neither contributes to relevance.
+    // Vector range keeps the pre-filter's verdict: re-deriving it costs a
+    // distance per scored document, and a pure range query scores every hit.
+    // kNone has no term occurrence to score. Neither contributes to relevance.
     case PredicateType::kVectorRange:
     case PredicateType::kNone:
       return 0.0f;
@@ -1631,14 +1637,17 @@ std::optional<float> ScoreDocument(const Predicate *root_predicate,
 
 void ScoreTextQuery(const Predicate *root_predicate,
                     std::vector<indexes::BorrowedNeighbor> &candidates,
-                    QueryContext &query_ctx) {
+                    QueryContext &query_ctx, QueryOperations query_operations) {
   if (candidates.empty() || options::IsScoringDisabled()) return;
 
   // Candidates came from this index, so total_docs should be > 0; degrade to
   // "no scores" rather than aborting if the invariant ever breaks. Candidates
   // keep their initial 0.0 score.
   if (query_ctx.Stats().total_docs == 0) return;
-  ScoreContext score_ctx{query_ctx};
+  indexes::PrefilterEvaluator prefilter(query_ctx, query_operations,
+                                        query_ctx.Schema(),
+                                        /*source_resolves_text=*/false);
+  ScoreContext score_ctx{query_ctx, &prefilter};
 
   std::vector<indexes::BorrowedNeighbor> scored;
   scored.reserve(candidates.size());
@@ -1667,7 +1676,7 @@ static void ApplyRelevanceScore(const SearchParameters &parameters,
         {BorrowedInternedStringPtr(neighbor.external_id), 0.0f, 0.0f});
   }
   ScoreTextQuery(parameters.filter_parse_results.root_predicate.get(), borrowed,
-                 query_ctx);
+                 query_ctx, parameters.filter_parse_results.query_operations);
   for (size_t i = 0; i < neighbors.size(); ++i) {
     neighbors[i].score = borrowed[i].score;
   }
@@ -1690,23 +1699,19 @@ void ApplyHybridTextScore(const SearchParameters &parameters,
 
 std::optional<absl::flat_hash_set<absl::string_view>> ReadRecordTags(
     const RecordsMap &records, const TagPredicate &predicate) {
-  auto record = records.find(
-      vmsdk::ToStringView(predicate.GetRetainedIdentifier().get()));
-  if (record == records.end()) return std::nullopt;
+  auto tags = RecordField(records, predicate.GetIdentifier());
+  if (!tags) return std::nullopt;
   // Tokenized as the index tokenizes stored values, so membership agrees with
   // the index's.
-  return indexes::Tag::ParseRecordTags(
-      vmsdk::ToStringView(record->second.value.get()),
-      predicate.GetIndex()->GetSeparator());
+  return indexes::Tag::ParseRecordTags(*tags,
+                                       predicate.GetIndex()->GetSeparator());
 }
 
 std::optional<double> ReadRecordNumeric(const RecordsMap &records,
                                         const NumericPredicate &predicate) {
-  auto record = records.find(
-      vmsdk::ToStringView(predicate.GetRetainedIdentifier().get()));
-  if (record == records.end()) return std::nullopt;
-  auto value =
-      vmsdk::To<double>(vmsdk::ToStringView(record->second.value.get()));
+  auto field = RecordField(records, predicate.GetIdentifier());
+  if (!field) return std::nullopt;
+  auto value = vmsdk::To<double>(*field);
   if (!value.ok()) return std::nullopt;
   return *value;
 }
@@ -1714,12 +1719,13 @@ std::optional<double> ReadRecordNumeric(const RecordsMap &records,
 std::optional<float> RecomputeDocumentScore(const Predicate *root_predicate,
                                             const InternedStringPtr &key,
                                             QueryContext &query_ctx,
-                                            const RecordsMap &records) {
+                                            const RecordsMap &records,
+                                            Evaluator &evaluator) {
   CHECK(query_ctx.ShortLocks());
   if (options::IsScoringDisabled() || query_ctx.Stats().total_docs == 0) {
     return std::nullopt;
   }
-  ScoreContext score_ctx{query_ctx, &records};
+  ScoreContext score_ctx{query_ctx, nullptr, &evaluator, &records};
   return ScoreDocument(root_predicate, BorrowedInternedStringPtr(key),
                        score_ctx);
 }
@@ -1882,7 +1888,8 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
   // ScoreTextQuery's null-predicate wildcard branch.
   if (!borrowed.empty() && !score_in_drain) {
     ScoreTextQuery(parameters.filter_parse_results.root_predicate.get(),
-                   borrowed, *query_ctx);
+                   borrowed, *query_ctx,
+                   parameters.filter_parse_results.query_operations);
   }
   return borrowed;
 }

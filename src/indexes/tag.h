@@ -171,6 +171,11 @@ class Tag : public IndexBase {
   size_t GetPrefixMatchDocCount(
       absl::string_view prefix_value, BorrowedInternedStringPtr key,
       bool lock = false) const ABSL_NO_THREAD_SAFETY_ANALYSIS;
+  // The same over `tags`, a document's raw tag string, for a document whose
+  // current tags may not be the indexed ones.
+  size_t GetPrefixMatchDocCount(absl::string_view prefix_value,
+                                absl::string_view tags, bool lock = false) const
+      ABSL_NO_THREAD_SAFETY_ANALYSIS;
   static absl::StatusOr<absl::flat_hash_set<absl::string_view>> ParseSearchTags(
       absl::string_view data, char separator);
   static absl::flat_hash_set<absl::string_view> ParseRecordTags(
@@ -183,6 +188,9 @@ class Tag : public IndexBase {
       absl::string_view value) const ABSL_NO_THREAD_SAFETY_ANALYSIS;
 
  private:
+  size_t PrefixMatchDocCount(absl::string_view prefix_value,
+                             absl::string_view tags) const
+      ABSL_NO_THREAD_SAFETY_ANALYSIS;
   void IndexTagForKey(absl::string_view tag, const InternedStringPtr &key)
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(index_mutex_);
   void DeindexTagForKey(absl::string_view tag, const InternedStringPtr &key)

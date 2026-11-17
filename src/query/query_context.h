@@ -106,8 +106,13 @@ class QueryContext {
   float DocScore(BorrowedInternedStringPtr key) const;
   size_t TagPrefixDocCount(const indexes::Tag &index, absl::string_view prefix,
                            BorrowedInternedStringPtr key) const;
+  // The same over `tags`, the document's current raw tag string.
+  size_t TagPrefixDocCount(const indexes::Tag &index, absl::string_view prefix,
+                           absl::string_view tags) const;
 
   bool ShortLocks() const { return mode_ == LockMode::kShortLocks; }
+
+  const IndexSchema &Schema() const { return index_schema_; }
 
   const indexes::scoring::Scorer *Scorer() const { return scorer_; }
   const CorpusStats &Stats() const { return stats_; }

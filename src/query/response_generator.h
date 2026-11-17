@@ -33,6 +33,35 @@ vmsdk::config::Number &GetMaxSearchResultFieldsCount();
 }  // namespace valkey_search::options
 namespace valkey_search::query {
 
+// Revalidates a mutated document against the fetched record (tags, numerics,
+// vector range) and the text index (text). Runs on the main thread, so text
+// goes through a main-thread QueryContext and never the time-sliced mutex.
+class PredicateEvaluator : public Evaluator {
+ public:
+  PredicateEvaluator(const RecordsMap &records, InternedStringPtr target_key,
+                     QueryContext &query_ctx, QueryOperations query_operations,
+                     const IndexSchema &index_schema)
+      : Evaluator(query_operations),
+        records_(records),
+        target_key_(std::move(target_key)),
+        query_ctx_(query_ctx),
+        index_schema_(index_schema) {}
+
+  const InternedStringPtr &GetTargetKey() const override { return target_key_; }
+  EvaluationResult EvaluateTags(const TagPredicate &predicate) override;
+  EvaluationResult EvaluateNumeric(const NumericPredicate &predicate) override;
+  EvaluationResult EvaluateText(const TextPredicate &predicate,
+                                bool require_positions) override;
+  EvaluationResult EvaluateVectorRange(
+      const VectorRangePredicate &predicate) override;
+
+ private:
+  const RecordsMap &records_;
+  InternedStringPtr target_key_;
+  QueryContext &query_ctx_;
+  const IndexSchema &index_schema_;
+};
+
 // Check if this node owns the slot for the given key in cluster mode
 bool CheckSlotOwnership(ValkeyModuleCtx *ctx, absl::string_view key);
 

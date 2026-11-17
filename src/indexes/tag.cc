@@ -542,20 +542,29 @@ size_t Tag::GetTagValueDocCount(absl::string_view value, bool lock) const {
 size_t Tag::GetPrefixMatchDocCount(absl::string_view prefix_value,
                                    BorrowedInternedStringPtr key,
                                    bool lock) const {
-  if (prefix_value.empty() || prefix_value.back() != '*') return 0;
-  const absl::string_view prefix =
-      prefix_value.substr(0, prefix_value.size() - 1);
   std::optional<absl::MutexLock> guard;
   if (lock) guard.emplace(&index_mutex_);
-
-  // Scan the doc's own tags rather than the prefix's rax subtree: a doc carries
-  // a handful of tags while a prefix can match an unbounded slice of the index.
   // Lock-free by the read-side invariant GetValue relies on.
   auto it = tracked_tags_by_keys_.find(key);
   if (it == tracked_tags_by_keys_.end()) return 0;
+  return PrefixMatchDocCount(prefix_value, it->second.raw_tag_string->Str());
+}
 
-  for (const auto &part :
-       absl::StrSplit(it->second.raw_tag_string->Str(), separator_)) {
+size_t Tag::GetPrefixMatchDocCount(absl::string_view prefix_value,
+                                   absl::string_view tags, bool lock) const {
+  std::optional<absl::MutexLock> guard;
+  if (lock) guard.emplace(&index_mutex_);
+  return PrefixMatchDocCount(prefix_value, tags);
+}
+
+size_t Tag::PrefixMatchDocCount(absl::string_view prefix_value,
+                                absl::string_view tags) const {
+  if (prefix_value.empty() || prefix_value.back() != '*') return 0;
+  const absl::string_view prefix =
+      prefix_value.substr(0, prefix_value.size() - 1);
+  // Scan the doc's own tags rather than the prefix's rax subtree: a doc carries
+  // a handful of tags while a prefix can match an unbounded slice of the index.
+  for (const auto &part : absl::StrSplit(tags, separator_)) {
     const absl::string_view tag = absl::StripAsciiWhitespace(part);
     // Empty tags are never indexed (ParseRecordTags drops them), and a bare `*`
     // query gives an empty prefix that would otherwise match one.

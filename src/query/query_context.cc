@@ -96,6 +96,12 @@ size_t QueryContext::TagPrefixDocCount(const indexes::Tag &index,
   return index.GetPrefixMatchDocCount(prefix, key, ShortLocks());
 }
 
+size_t QueryContext::TagPrefixDocCount(const indexes::Tag &index,
+                                       absl::string_view prefix,
+                                       absl::string_view tags) const {
+  return index.GetPrefixMatchDocCount(prefix, tags, ShortLocks());
+}
+
 size_t QueryContext::KeyCount(const WordPostings &word) const {
   auto get = [&] { return word.postings->GetKeyCount(); };
   return ShortLocks() ? text_index_schema_->WithWordLock(*word.word, get)

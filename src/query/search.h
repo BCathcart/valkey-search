@@ -518,10 +518,11 @@ size_t FindVectorDelimiter(absl::string_view expr);
 // Scores admitted candidates in place by walking the predicate tree per
 // document. Sorting and trimming to the requested limit happen later in
 // SearchResult::TrimResults. `query_ctx` is the query's, so leaves resolved
-// while filtering are reused here.
+// while filtering are reused here. Filter leaves are judged by a
+// PrefilterEvaluator built for `query_operations`.
 void ScoreTextQuery(const Predicate *root_predicate,
                     std::vector<indexes::BorrowedNeighbor> &candidates,
-                    QueryContext &query_ctx);
+                    QueryContext &query_ctx, QueryOperations query_operations);
 
 // A revalidated document's tags for the predicate's field, read from the
 // fetched record rather than the index, which may not reflect the mutation yet.
@@ -535,14 +536,16 @@ std::optional<double> ReadRecordNumeric(const RecordsMap &records,
                                         const NumericPredicate &predicate);
 
 // Main-thread rescoring of one revalidated document, through the same ScoreNode
-// walk ScoreTextQuery runs so the result is on the shard-side scale.
-// `query_ctx` must be in kShortLocks: this runs outside any time-sliced read
-// phase and never acquires that mutex. nullopt when ScoreNode re-derives a
-// non-match; callers score 0 rather than drop the document.
+// walk ScoreTextQuery runs so the result is on the shard-side scale. Filter
+// leaves are judged by `evaluator`, the one that revalidated the document
+// against `records`. `query_ctx` must be in kShortLocks: this runs outside any
+// time-sliced read phase and never acquires that mutex. nullopt when the walk
+// finds a non-match; callers score 0 rather than drop the document.
 std::optional<float> RecomputeDocumentScore(const Predicate *root_predicate,
                                             const InternedStringPtr &key,
                                             QueryContext &query_ctx,
-                                            const RecordsMap &records);
+                                            const RecordsMap &records,
+                                            Evaluator &evaluator);
 
 }  // namespace valkey_search::query
 #endif  // VALKEYSEARCH_SRC_QUERY_SEARCH_H_

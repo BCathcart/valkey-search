@@ -82,88 +82,65 @@ vmsdk::config::Number &GetMaxSearchResultFieldsCount() {
 
 namespace valkey_search::query {
 
-// Revalidates a mutated document against the fetched record (tags, numerics,
-// vector range) and the text index (text). Runs on the main thread, so text
-// goes through a main-thread QueryContext and never the time-sliced mutex.
-class PredicateEvaluator : public query::Evaluator {
- public:
-  PredicateEvaluator(const RecordsMap &records, InternedStringPtr target_key,
-                     QueryContext &query_ctx, QueryOperations query_operations,
-                     const IndexSchema &index_schema)
-      : Evaluator(query_operations),
-        records_(records),
-        target_key_(std::move(target_key)),
-        query_ctx_(query_ctx),
-        index_schema_(index_schema) {}
+EvaluationResult PredicateEvaluator::EvaluateTags(
+    const TagPredicate &predicate) {
+  auto tags = ReadRecordTags(records_, predicate);
+  return predicate.Evaluate(tags ? &*tags : nullptr,
+                            predicate.GetIndex()->IsCaseSensitive());
+}
 
-  const InternedStringPtr &GetTargetKey() const override { return target_key_; }
+EvaluationResult PredicateEvaluator::EvaluateNumeric(
+    const NumericPredicate &predicate) {
+  auto value = ReadRecordNumeric(records_, predicate);
+  return predicate.Evaluate(value ? &*value : nullptr);
+}
 
-  EvaluationResult EvaluateTags(const query::TagPredicate &predicate) override {
-    auto tags = ReadRecordTags(records_, predicate);
-    return predicate.Evaluate(tags ? &*tags : nullptr,
-                              predicate.GetIndex()->IsCaseSensitive());
+EvaluationResult PredicateEvaluator::EvaluateText(
+    const TextPredicate &predicate, bool require_positions) {
+  return EvaluateTextLeaf(
+      query_ctx_, predicate, target_key_, require_positions,
+      [this] { return query_ctx_.PerKeyTextIndex(target_key_); });
+}
+
+EvaluationResult PredicateEvaluator::EvaluateVectorRange(
+    const VectorRangePredicate &predicate) {
+  auto query_vector = predicate.GetQueryVector();
+  if (query_vector.empty()) {
+    return EvaluationResult(false);
   }
-
-  EvaluationResult EvaluateNumeric(
-      const query::NumericPredicate &predicate) override {
-    auto value = ReadRecordNumeric(records_, predicate);
-    return predicate.Evaluate(value ? &*value : nullptr);
+  auto index = index_schema_.GetIndex(predicate.GetAlias());
+  if (!index.ok()) {
+    return EvaluationResult(false);
   }
-
-  EvaluationResult EvaluateText(const query::TextPredicate &predicate,
-                                bool require_positions) override {
-    return query::EvaluateTextLeaf(
-        query_ctx_, predicate, target_key_, require_positions,
-        [this] { return query_ctx_.PerKeyTextIndex(target_key_); });
+  auto *vector_index = dynamic_cast<indexes::VectorBase *>(index->get());
+  if (!vector_index) {
+    return EvaluationResult(false);
   }
-
-  EvaluationResult EvaluateVectorRange(
-      const query::VectorRangePredicate &predicate) override {
-    auto query_vector = predicate.GetQueryVector();
-    if (query_vector.empty()) {
-      return EvaluationResult(false);
-    }
-    auto index = index_schema_.GetIndex(predicate.GetAlias());
-    if (!index.ok()) {
-      return EvaluationResult(false);
-    }
-    auto *vector_index = dynamic_cast<indexes::VectorBase *>(index->get());
-    if (!vector_index) {
-      return EvaluationResult(false);
-    }
-    // Judges the vector as fetched into records_ (like the tag/numeric checks
-    // above), not via the index: this runs post-lock on the main thread, so
-    // the lock-free index accessors would race writer threads.
-    auto it = records_.find(predicate.GetIdentifier());
-    if (it == records_.end()) {
-      return EvaluationResult(false);
-    }
-    ValkeyModuleString *record = it->second.value.get();
-    // A JSON vector is fetched as text; convert it the way ingestion does.
-    vmsdk::UniqueValkeyString converted;
-    if (index_schema_.GetAttributeDataType().AttributesProvidedAsString()) {
-      converted = vector_index->NormalizeStringAttribute(
-          vmsdk::RetainUniqueValkeyString(record));
-      if (!converted) {
-        return EvaluationResult(false);
-      }
-      record = converted.get();
-    }
-    auto distance = vector_index->RecomputeRangeDistance(
-        vmsdk::ToStringView(record), query_vector);
-    if (!distance.ok() ||
-        *distance > static_cast<float>(predicate.GetRadius())) {
-      return EvaluationResult(false);
-    }
-    return {true, *distance};
+  // Judges the vector as fetched into records_ (like the tag/numeric checks
+  // above), not via the index: this runs post-lock on the main thread, so
+  // the lock-free index accessors would race writer threads.
+  auto it = records_.find(predicate.GetIdentifier());
+  if (it == records_.end()) {
+    return EvaluationResult(false);
   }
-
- private:
-  const RecordsMap &records_;
-  InternedStringPtr target_key_;
-  QueryContext &query_ctx_;
-  const IndexSchema &index_schema_;
-};
+  ValkeyModuleString *record = it->second.value.get();
+  // A JSON vector is fetched as text; convert it the way ingestion does.
+  vmsdk::UniqueValkeyString converted;
+  if (index_schema_.GetAttributeDataType().AttributesProvidedAsString()) {
+    converted = vector_index->NormalizeStringAttribute(
+        vmsdk::RetainUniqueValkeyString(record));
+    if (!converted) {
+      return EvaluationResult(false);
+    }
+    record = converted.get();
+  }
+  auto distance = vector_index->RecomputeRangeDistance(
+      vmsdk::ToStringView(record), query_vector);
+  if (!distance.ok() || *distance > static_cast<float>(predicate.GetRadius())) {
+    return EvaluationResult(false);
+  }
+  return {true, *distance};
+}
 
 DEV_INTEGER_COUNTER(query, predicate_revalidation);
 
@@ -241,7 +218,8 @@ FilterVerification VerifyFilter(const query::SearchParameters &parameters,
     // nullopt (empty corpus / non-match) degrades to 0 rather than dropping the
     // already-admitted document.
     verification.recomputed_score =
-        RecomputeDocumentScore(predicate, n.external_id, *query_ctx, records)
+        RecomputeDocumentScore(predicate, n.external_id, *query_ctx, records,
+                               evaluator)
             .value_or(0.0f);
   }
   return verification;
