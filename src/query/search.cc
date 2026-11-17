@@ -1455,7 +1455,11 @@ void ScoreTextQuery(const SearchParameters &parameters,
 static void ApplyRelevanceScore(const SearchParameters &parameters,
                                 std::vector<indexes::Neighbor> &neighbors,
                                 QueryContext &query_ctx) {
-  if (neighbors.empty() || !RelevanceScorer::Enabled(query_ctx)) return;
+  if (!RelevanceScorer::Enabled(query_ctx)) {
+    // Unscored is 0, never the distance the Neighbor was built with.
+    for (auto &neighbor : neighbors) neighbor.score = 0.0f;
+    return;
+  }
   RelevanceScorer scorer(parameters, query_ctx);
   for (auto &neighbor : neighbors) {
     if (parameters.has_vector_range) {

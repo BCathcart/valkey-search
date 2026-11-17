@@ -1027,25 +1027,30 @@ class TestScoringDisabled(ValkeySearchTestCaseDebugMode):
 
     def test_scoring_disabled_zeroes_scores(self):
         client = self.server.get_new_client()
-        load(client, IDX_MAIN, PARTIAL_TEXT_DOCS)
+        load(client, IDX_MAIN, TAG_VEC_DOCS)
+        params = ("PARAMS", "2", "q", _vec(0.0, 0.0), "DIALECT", "2")
 
-        # Pure text is scored in-iterator; text+tag takes the extra step.
-        queries = ["hello", "hello @cat:{a}"]
+        # Pure text is scored in-iterator; text+tag takes the extra step; the
+        # range and KNN queries carry a distance that must not leak into the
+        # score.
+        queries = [("one",), ("one @cat:{a}",),
+                   ("one @vec:[VECTOR_RANGE 1.0 $q]", *params),
+                   ("@cat:{a}=>[KNN 3 @vec $q]", *params)]
 
         # Baseline: scores are non-zero, so the zeroes below are the switch
         # working rather than an empty result.
         for query in queries:
-            _, scores = search(client, IDX_MAIN, query)
+            _, scores = search(client, IDX_MAIN, *query)
             assert scores and all(v > 0.0 for v in scores.values()), \
-                f"expected non-zero scores for {query!r}, got {scores}"
+                f"expected non-zero scores for {query[0]!r}, got {scores}"
 
         client.execute_command("CONFIG", "SET", "search.scoring-disabled", "yes")
 
         # Same queries still match the same docs; every score is now 0.
         for query in queries:
-            keys, scores = search(client, IDX_MAIN, query)
+            keys, scores = search(client, IDX_MAIN, *query)
             assert keys and scores == pytest.approx({k: 0.0 for k in keys}), \
-                f"expected all-zero scores for {query!r}, got {scores}"
+                f"expected all-zero scores for {query[0]!r}, got {scores}"
 
     def test_scoring_disabled_zeroes_recomputed_scores(self):
         client = self.server.get_new_client()
@@ -1057,8 +1062,8 @@ class TestScoringDisabled(ValkeySearchTestCaseDebugMode):
         def score_across_mutation(body):
             """Parks doc:1's index update so its db sequence number runs ahead
             of the index's: the query blocks on the contention check, then
-            resumes into the content fetch, which rescores doc:1 through
-            SingleDocumentScorer. Returns (scores, docs rescored there)."""
+            resumes into the content fetch, where VerifyFilter rescores doc:1.
+            Returns (scores, docs rescored there)."""
             revals, blocked = stat("predicate_revalidation"), stat(
                 "text_query_blocked_count")
             pausepoint("SET")
