@@ -36,6 +36,8 @@ SHAPE_COUNTS = {
     "tag_only": 200,
     "text_vector": 200,
     "text_numeric_tag_vector": 200,
+    "or_filtered_and": 200,
+    "or_filtered_and_with_knn": 200,
 }
 
 # --- text ---
@@ -192,6 +194,13 @@ class _QueryBuilder:
         for _ in range(SHAPE_COUNTS["text_numeric_tag_vector"]):
             emit("text_numeric_tag_vector", *self._with_knn(*self._text_numeric_tag()))
 
+        # An AND that fails only on its filter leaf must add nothing to the OR.
+        for _ in range(SHAPE_COUNTS["or_filtered_and"]):
+            emit("or_filtered_and", *self._or_filtered_and())
+
+        for _ in range(SHAPE_COUNTS["or_filtered_and_with_knn"]):
+            emit("or_filtered_and_with_knn", *self._with_knn(*self._or_filtered_and()))
+
         return self.shapes
 
     def _emit(self, shape, query, hits, params=()):
@@ -336,6 +345,33 @@ class _QueryBuilder:
             tag = f"({tag})"
         return (f"{text} @n1:[{low} {high}] {tag}",
                 text_hits & set(range(low, high + 1)) & self._tag_hits(values))
+
+    def _or_filtered_and(self):
+        """(query, hits) for `(<text> <filter>) | <term>`, either branch order: the
+        filter (a tag, an @n1 window or a negated term) rejects some of the text's
+        hits, and the term is drawn from one of those, so the OR admits it with
+        the AND failing on the filter alone."""
+        rng = self.rng
+        while True:
+            doc, text, text_hits = self._text(rng.choice(TEXT_KINDS), parent_op="AND")
+            kind = rng.choice(["tag", "numeric", "negate"])
+            if kind == "tag":
+                value = rng.choice(sorted(SCORING_TAG_FREQS))
+                filter_, filter_hits = f"@t1:{{{value}}}", self.tag_docs[value]
+            elif kind == "numeric":
+                low, high = rng.choice(NUMERIC_RANGES)
+                filter_, filter_hits = f"@n1:[{low} {high}]", set(range(low, high + 1))
+            else:
+                term = rng.choice(self.free_terms)
+                filter_, filter_hits = f"-{term}", set(self.docs) - self.hits[term]
+            rejected = sorted(text_hits - filter_hits)
+            if rejected:
+                break
+        other = rng.choice(self.doc_terms[rng.choice(rejected)])
+        branches = [f"({text} {filter_})", other]
+        if rng.random() < 0.5:
+            branches.reverse()
+        return " | ".join(branches), (text_hits & filter_hits) | self.hits[other]
 
     # --- vector ---
 
