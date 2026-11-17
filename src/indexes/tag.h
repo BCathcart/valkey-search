@@ -99,7 +99,7 @@ class Tag : public IndexBase {
   // held by the tracked entry; valid for the duration of the call under the
   // index's read-side invariant.
   std::optional<absl::flat_hash_set<absl::string_view>> GetValue(
-      const InternedStringPtr &key,
+      BorrowedInternedStringPtr key,
       bool &case_sensitive) const ABSL_NO_THREAD_SAFETY_ANALYSIS;
 
   // Iterator yielded by EntriesFetcher::Begin(). Walks a vector of rax slots

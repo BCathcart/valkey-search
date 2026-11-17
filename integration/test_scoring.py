@@ -117,8 +117,9 @@ STEM_RUNNING_SCORES = {
 # avg_doc_len, and every stem-leaf dt are identical, and the stem scores match
 # STEM_RUNNING_SCORES) PLUS a numeric `rank` and tag `cat` field. A query that
 # adds a numeric or tag clause has a non-text predicate, so its scoring takes the
-# EXTRA-STEP path (ResolveLeaves/ScoreNode) rather than the pure-text in-iterator
-# path -- Group 15 pins the stem split on that path against idxStem.
+# EXTRA-STEP path (the scoring-mode predicate evaluator) rather than the
+# pure-text in-iterator path -- Group 15 pins the stem split on that path
+# against idxStem.
 _STEMMIX_RANK = {"s:1": 1, "s:2": 2, "s:3": 3, "s:4": 4,
                  "s:5": 5, "s:6": 6, "s:7": 7}
 _STEMMIX_CAT = {"s:1": "a", "s:2": "a", "s:3": "b", "s:4": "a",

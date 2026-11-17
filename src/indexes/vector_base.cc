@@ -170,6 +170,7 @@ query::EvaluationResult PrefilterEvaluator::EvaluateFull(
   per_key_index_fetched_ = false;
   auto res = predicate.Evaluate(*this);
   key_ = nullptr;
+  vector_range_known_ = false;
   return res;
 }
 
@@ -210,6 +211,10 @@ query::EvaluationResult PrefilterEvaluator::EvaluateText(
 query::EvaluationResult PrefilterEvaluator::EvaluateVectorRange(
     const query::VectorRangePredicate &predicate) {
   CHECK(key_);
+  if (vector_range_known_) {
+    return vector_range_ ? query::EvaluationResult(true, *vector_range_)
+                         : query::EvaluationResult(false);
+  }
   auto query_vector = predicate.GetQueryVector();
   if (query_vector.empty()) {
     return query::EvaluationResult(false);

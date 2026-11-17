@@ -354,7 +354,7 @@ InternedStringPtr Tag::GetRawValue(const InternedStringPtr &key) const {
 }
 
 std::optional<absl::flat_hash_set<absl::string_view>> Tag::GetValue(
-    const InternedStringPtr &key, bool &case_sensitive) const {
+    BorrowedInternedStringPtr key, bool &case_sensitive) const {
   // Note that the Tag index is not mutated while the time sliced mutex is
   // in a read mode and therefore it is safe to skip lock acquiring.
   if (auto it = tracked_tags_by_keys_.find(key);

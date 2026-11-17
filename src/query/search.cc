@@ -1395,51 +1395,75 @@ float ScoreDocument(const Predicate *root_predicate, float sum,
       query_ctx.Scorer()->ComposeDocumentScore(sum, query_ctx.DocScore(key)));
 }
 
+namespace {
+
+// Scoring-mode walks over one query's admitted documents.
+class RelevanceScorer {
+ public:
+  RelevanceScorer(const SearchParameters &parameters, QueryContext &query_ctx)
+      : root_(parameters.filter_parse_results.root_predicate.get()),
+        query_ctx_(query_ctx),
+        // Every leaf is evaluated, the text children the entries fetchers
+        // resolved included: they carry the BM25.
+        evaluator_(query_ctx, parameters.filter_parse_results.query_operations,
+                   *parameters.index_schema, /*source_resolves_text=*/false,
+                   /*scoring=*/true) {}
+
+  // False when scoring is off or the corpus is empty: candidates came from this
+  // index, so total_docs should be > 0; degrade to "no scores" rather than
+  // aborting if the invariant ever breaks. Candidates keep their 0.0 score.
+  static bool Enabled(const QueryContext &query_ctx) {
+    return !options::IsScoringDisabled() && query_ctx.Stats().total_docs > 0;
+  }
+
+  indexes::PrefilterEvaluator &Evaluator() { return evaluator_; }
+
+  float Score(const InternedStringPtr &key) {
+    float sum = 0.0f;
+    if (root_ != nullptr) {
+      EvaluationResult result = evaluator_.EvaluateFull(*root_, key);
+      // Admitted by the pre-filter, so a non-match here keeps the document at
+      // score 0 rather than dropping it.
+      if (!result.matches) return 0.0f;
+      sum = result.score;
+    }
+    return ScoreDocument(root_, sum, BorrowedInternedStringPtr(key),
+                         query_ctx_);
+  }
+
+ private:
+  const Predicate *root_;
+  QueryContext &query_ctx_;
+  indexes::PrefilterEvaluator evaluator_;
+};
+
+}  // namespace
+
 void ScoreTextQuery(const SearchParameters &parameters,
                     std::vector<indexes::BorrowedNeighbor> &candidates,
                     QueryContext &query_ctx) {
-  if (candidates.empty() || options::IsScoringDisabled()) return;
-
-  // Candidates came from this index, so total_docs should be > 0; degrade to
-  // "no scores" rather than aborting if the invariant ever breaks. Candidates
-  // keep their initial 0.0 score.
-  if (query_ctx.Stats().total_docs == 0) return;
-  const Predicate *root = parameters.filter_parse_results.root_predicate.get();
-  // Every leaf is evaluated, the text children the entries fetchers resolved
-  // included: they carry the BM25.
-  indexes::PrefilterEvaluator evaluator(
-      query_ctx, parameters.filter_parse_results.query_operations,
-      *parameters.index_schema, /*source_resolves_text=*/false,
-      /*scoring=*/true);
+  if (candidates.empty() || !RelevanceScorer::Enabled(query_ctx)) return;
+  RelevanceScorer scorer(parameters, query_ctx);
   for (auto &candidate : candidates) {
-    float sum = 0.0f;
-    if (root != nullptr) {
-      const InternedStringPtr key = candidate.key.Materialize();
-      EvaluationResult result = evaluator.EvaluateFull(*root, key);
-      // Admitted by the pre-filter, so a non-match here keeps the document at
-      // score 0 rather than dropping it.
-      if (!result.matches) continue;
-      sum = result.score;
-    }
-    candidate.score = ScoreDocument(root, sum, candidate.key, query_ctx);
+    candidate.score = scorer.Score(candidate.key.Materialize());
   }
 }
 
-// Sets Neighbor.score to the relevance ScoreTextQuery computes for non-vector
-// candidates, via a thin BorrowedNeighbor adapter; ScoreTextQuery preserves
-// order, so the scores map back by index. Neighbor.distance is left untouched.
+// Sets Neighbor.score to the relevance of `neighbors`, which own their keys.
+// Neighbor.distance is left untouched; for a range query it is the key's
+// VECTOR_RANGE verdict, which the walk reuses rather than recomputing.
 static void ApplyRelevanceScore(const SearchParameters &parameters,
                                 std::vector<indexes::Neighbor> &neighbors,
                                 QueryContext &query_ctx) {
-  std::vector<indexes::BorrowedNeighbor> borrowed;
-  borrowed.reserve(neighbors.size());
-  for (const auto &neighbor : neighbors) {
-    borrowed.push_back(
-        {BorrowedInternedStringPtr(neighbor.external_id), 0.0f, 0.0f});
-  }
-  ScoreTextQuery(parameters, borrowed, query_ctx);
-  for (size_t i = 0; i < neighbors.size(); ++i) {
-    neighbors[i].score = borrowed[i].score;
+  if (neighbors.empty() || !RelevanceScorer::Enabled(query_ctx)) return;
+  RelevanceScorer scorer(parameters, query_ctx);
+  for (auto &neighbor : neighbors) {
+    if (parameters.has_vector_range) {
+      scorer.Evaluator().SetVectorRange(neighbor.has_vr_distance
+                                            ? std::optional(neighbor.distance)
+                                            : std::nullopt);
+    }
+    neighbor.score = scorer.Score(neighbor.external_id);
   }
 }
 

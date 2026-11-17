@@ -2890,8 +2890,9 @@ class ScoreTextQueryTestBase : public ValkeySearchTest {
   // Score `key` against `filter` as the extra-step path does: a candidate the
   // walk does not match stays at 0.
   std::optional<float> Score(MockIndexSchema &schema, absl::string_view filter,
-                             const std::string &key) {
-    auto parameters = Parameters(schema, filter);
+                             const std::string &key,
+                             const TextParsingOptions &options = {}) {
+    auto parameters = Parameters(schema, filter, options);
     auto interned = StringInternStore::Intern(key);
     std::vector<indexes::BorrowedNeighbor> cands{
         {BorrowedInternedStringPtr(interned), 0.0f, 0.0f}};
@@ -3334,6 +3335,25 @@ TEST_F(ScoreTextQueryTestBase, RecomputeScoresTagsFromRecord) {
   EXPECT_LT(*as_blue, *indexed);
   // Record dropped the field: the document no longer matches.
   EXPECT_FALSE(Recompute(*schema, filter, "d1"));
+}
+
+// The record-backed path re-derives an AND's tag, numeric and negation leaves
+// too: an AND under an OR that fails only on its filter adds nothing (#1728).
+TEST_F(ScoreTextQueryTestBase, RecomputeOrFilteredAndScoresBareText) {
+  auto schema =
+      BuildTextTagSchema({{"k1", "apple banana", "red"}, {"k2", "apple", ""}});
+  auto bare = Recompute(*schema, "@text:apple", "k1", {{"color", "red"}});
+  ASSERT_TRUE(bare);
+  for (const char *filtered :
+       {"(@text:banana @color:{blue})", "(@text:banana @rating:[0 10])",
+        "(@text:banana -@text:apple)"}) {
+    for (const auto &filter : {absl::StrCat(filtered, " | @text:apple"),
+                               absl::StrCat("@text:apple | ", filtered)}) {
+      auto got = Recompute(*schema, filter, "k1", {{"color", "red"}});
+      ASSERT_TRUE(got) << filter;
+      EXPECT_NEAR(*got, *bare, 1e-4f) << filter;
+    }
+  }
 }
 
 // A query that omits SCORER picks up the `default-scorer` config.
@@ -4045,6 +4065,8 @@ TEST_F(ScoreTextQueryTestBase, MainThreadLockModesMatchBackground) {
       {"-@rating:[500 600] @text:(*ing fast)", inorder},
       {"-@rating:[500 600] @text:(%cat% fast)", slop2},
       {"-@rating:[500 600] @text:(running | ran)", inorder},
+      {"-@rating:[500 600] @text:cat (@text:ran | @rating:[0 100])", inorder},
+      {"-@rating:[500 600] @text:cat (@rating:[0 100] | @text:ran)", slop0},
   };
   // Every selectable scorer, so a per-document input a new scorer reads is
   // checked on both paths too.
@@ -4081,6 +4103,23 @@ TEST_F(ScoreTextQueryTestBase, MainThreadLockModesMatchBackground) {
             << filter << " " << k;
       }
     }
+  }
+}
+
+// An OR with a non-text child under SLOP/INORDER: the matching numeric child
+// settles the OR without positions, so the enclosing proximity check is
+// skipped and every text child's term is still summed.
+TEST_F(ScoreTextQueryTestBase, MixedOrUnderProximityScoresTextChildren) {
+  auto schema = BuildTextTagSchema({{"d1", "the cat ran fast", ""}});
+  const TextParsingOptions inorder{.inorder = true};
+  auto cat = Score(*schema, "@text:cat", "d1");
+  auto ran = Score(*schema, "@text:ran", "d1");
+  ASSERT_TRUE(cat && ran);
+  for (const char *filter : {"@text:cat (@text:ran | @rating:[0 100])",
+                             "@text:cat (@rating:[0 100] | @text:ran)"}) {
+    auto got = Score(*schema, filter, "d1", inorder);
+    ASSERT_TRUE(got) << filter;
+    EXPECT_NEAR(*got, *cat + *ran, 1e-4f) << filter;
   }
 }
 

@@ -818,6 +818,14 @@ class PrefilterEvaluator : public query::Evaluator {
     return *key_;
   }
   bool SourceResolvesText() const override { return source_resolves_text_; }
+  // The key's VECTOR_RANGE verdict when the caller already holds it (a range
+  // search rescoring its own results): `distance` when within the radius,
+  // nullopt when not. EvaluateVectorRange then answers from it instead of
+  // recomputing the distance. Cleared by EvaluateFull.
+  void SetVectorRange(std::optional<float> distance) {
+    vector_range_ = distance;
+    vector_range_known_ = true;
+  }
 
  private:
   query::EvaluationResult EvaluateTags(
@@ -838,6 +846,8 @@ class PrefilterEvaluator : public query::Evaluator {
   const InternedStringPtr *key_{nullptr};
   const text::TextIndex *per_key_index_{nullptr};
   bool per_key_index_fetched_{false};
+  bool vector_range_known_{false};
+  std::optional<float> vector_range_;
 };
 
 }  // namespace valkey_search::indexes

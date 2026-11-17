@@ -409,12 +409,17 @@ EvaluationResult QueryContext::EvaluateTag(
     credit(value.idf);
     if (!scoring) return result;
   }
+  if (leaf.tag_prefixes.empty()) return result;
+  const indexes::Tag &index = *predicate.GetIndex();
+  if (!scoring) {
+    // One pass over the document's own tags answers every prefix.
+    bool case_sensitive = true;
+    auto tags = index.GetValue(key, case_sensitive);
+    return predicate.Evaluate(tags ? &*tags : nullptr, case_sensitive);
+  }
   for (absl::string_view prefix : leaf.tag_prefixes) {
-    const size_t dt =
-        predicate.GetIndex()->GetPrefixMatchDocCount(prefix, key, ShortLocks());
-    if (dt == 0) continue;
-    credit(Idf(dt));
-    if (!scoring) return result;
+    const size_t dt = index.GetPrefixMatchDocCount(prefix, key, ShortLocks());
+    if (dt != 0) credit(Idf(dt));
   }
   return result;
 }
