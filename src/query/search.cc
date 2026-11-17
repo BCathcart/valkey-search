@@ -1379,217 +1379,9 @@ float SanitizeScore(float score) {
   return indexes::scoring::IsNaN(score) ? 0.0f : score;
 }
 
-// Per-document scoring state around the query-scoped context.
-struct ScoreContext {
-  QueryContext &query_ctx;
-  // Main thread only: the fetched record, which supplies tag membership.
-  const RecordsMap *records = nullptr;
-
-  // The current document's own tree, fetched on the first expansion leaf that
-  // misses its representative and reused by the rest of that document's walk.
-  struct PerKeyIndex {
-    InternedStringPtr key;
-    const indexes::text::TextIndex *index = nullptr;
-    bool fetched = false;
-  };
-  PerKeyIndex per_key;
-
-  void BeginDocument() { per_key = {}; }
-  const indexes::text::TextIndex *PerKeyTextIndex(
-      BorrowedInternedStringPtr key) {
-    if (!per_key.fetched) {
-      per_key.fetched = true;
-      per_key.key = key.Materialize();
-      per_key.index = query_ctx.PerKeyTextIndex(per_key.key);
-    }
-    return per_key.index;
-  }
-};
-
-std::optional<float> ScoreNode(const Predicate *predicate,
-                               BorrowedInternedStringPtr key,
-                               ScoreContext &score_ctx) {
-  CHECK(predicate != nullptr);
-
-  switch (predicate->GetType()) {
-    case PredicateType::kComposedAnd: {
-      auto composed = static_cast<const ComposedPredicate *>(predicate);
-      float sum = 0.0f;
-      for (const auto &child : composed->GetChildren()) {
-        auto child_score = ScoreNode(child.get(), key, score_ctx);
-        // AND: every child must match, otherwise the document does not match
-        // this group and contributes nothing from it.
-        if (!child_score) return std::nullopt;
-        sum += *child_score;
-      }
-      return predicate->GetWeight() * sum;
-    }
-    case PredicateType::kComposedOr: {
-      auto composed = static_cast<const ComposedPredicate *>(predicate);
-      float sum = 0.0f;
-      bool matched = false;
-      for (const auto &child : composed->GetChildren()) {
-        auto child_score = ScoreNode(child.get(), key, score_ctx);
-        // OR: any matching child contributes; non-matching children are
-        // skipped.
-        if (child_score) {
-          matched = true;
-          sum += *child_score;
-        }
-      }
-      if (!matched) return std::nullopt;
-      return predicate->GetWeight() * sum;
-    }
-    case PredicateType::kText: {
-      ResolvedLeaf &resolved = score_ctx.query_ctx.GetOrResolve(predicate);
-      // Expansion leaf: ONE matched word's BM25, never the sum. The field gate
-      // matters on both routes: without it a word the doc carries only in
-      // another field would supply the idf and tf.
-      if (auto *expansion = std::get_if<ExpansionLeaf>(&resolved)) {
-        if (expansion->representative) {
-          if (auto entry =
-                  score_ctx.query_ctx.Probe(expansion->representative->term,
-                                            key, expansion->field_mask)) {
-            return score_ctx.query_ctx.ScoreLeaf(
-                {.idf = expansion->representative->idf,
-                 .term_frequency = entry->doc_stats.tf,
-                 .doc_len = entry->doc_stats.doc_len,
-                 .leaf_weight = predicate->GetWeight()});
-          }
-        }
-        // The document passed the filter, so it carries some other matched
-        // term: find one in the document's own tree rather than scoring 0.
-        const auto *per_key_index = score_ctx.PerKeyTextIndex(key);
-        if (per_key_index == nullptr) return std::nullopt;
-        auto match = score_ctx.query_ctx.FindExpansionMatch(
-            *expansion, *static_cast<const ExpansionPredicate *>(predicate),
-            *per_key_index, score_ctx.per_key.key);
-        if (!match) return std::nullopt;
-        return score_ctx.query_ctx.ScoreLeaf(
-            {.idf = match->idf,
-             .term_frequency = match->entry.doc_stats.tf,
-             .doc_len = match->entry.doc_stats.doc_len,
-             .leaf_weight = predicate->GetWeight()});
-      }
-
-      const auto &leaf = std::get<TermLeaf>(resolved);
-      if (leaf.groups.empty()) return std::nullopt;
-
-      // Term leaf: one BM25 term per group, summed. The document matches if
-      // any group has it in a queried field. doc_len rides on the posting
-      // entry, so the probe that yields tf yields it too.
-      float total = 0.0f;
-      bool matched = false;
-      uint32_t doc_len = 0;
-      for (const TermGroup &group : leaf.groups) {
-        uint32_t tf = 0;
-        for (const auto &word : group.words) {
-          if (auto entry =
-                  score_ctx.query_ctx.Probe(word, key, group.field_mask)) {
-            tf += entry->doc_stats.tf;
-            doc_len = entry->doc_stats.doc_len;
-          }
-        }
-        if (tf == 0) continue;
-        matched = true;
-        total += score_ctx.query_ctx.ScoreLeaf(
-            {.idf = group.idf,
-             .term_frequency = tf,
-             .doc_len = doc_len,
-             .leaf_weight = predicate->GetWeight()});
-      }
-      return matched ? std::optional<float>(total) : std::nullopt;
-    }
-    // A numeric range match is a filter, never a ranker: it carries no IDF, no
-    // term frequency, and no doc-length component, so under BM25STD it
-    // contributes nothing (Redis reports "Irrelevant token -> score is 0").
-    // Returning 0 leaves ordering unchanged whether or not a numeric clause is
-    // present — a numeric candidate only reaches here because the pre-filter
-    // admitted it, so there is no nullopt (non-match) path.
-    case PredicateType::kNumeric:
-      return 0.0f;
-    // A tag value is scored as a BM25 term with F ≡ 1 (term frequency is not
-    // counted): IDF over the per-tag-value document count, normalized by the
-    // document's TEXT length, honoring $weight. A union (`{red|blue}`) sums the
-    // terms for every matched value the document carries. Doc-length inputs
-    // come from the index's TEXT field; on a text-less index avg_doc_len is 0
-    // and ScoreLeaf returns 0 (a well-defined score, not Redis's nan).
-    case PredicateType::kTag: {
-      const auto &leaf =
-          std::get<TagLeaf>(score_ctx.query_ctx.GetOrResolve(predicate));
-      if (leaf.tag_values.empty() && leaf.tag_prefixes.empty()) return 0.0f;
-      const auto *tag_pred = static_cast<const TagPredicate *>(predicate);
-      const indexes::Tag *tag_index = tag_pred->GetIndex();
-
-      const uint32_t doc_len = score_ctx.query_ctx.DocLen(key);
-
-      // Membership from the bag in the read phase, from the fetched record's
-      // tags on the main thread (TagLeaf::Value).
-      std::optional<absl::flat_hash_set<absl::string_view>> doc_tags;
-      if (score_ctx.records != nullptr) {
-        doc_tags = ReadRecordTags(*score_ctx.records, *tag_pred);
-        if (!doc_tags) return 0.0f;
-      }
-      const bool case_sensitive = tag_index->IsCaseSensitive();
-      auto carries = [&](const TagLeaf::Value &value) {
-        if (!doc_tags) return value.bag->contains(key);
-        for (absl::string_view tag : *doc_tags) {
-          if (case_sensitive ? tag == value.value
-                             : absl::EqualsIgnoreCase(tag, value.value)) {
-            return true;
-          }
-        }
-        return false;
-      };
-
-      // Sum the BM25 term (F ≡ 1) for each resolved value the document carries.
-      // An untracked key is in no bag and scores 0.
-      float sum = 0.0f;
-      for (const auto &value : leaf.tag_values) {
-        if (!carries(value)) continue;
-        sum += score_ctx.query_ctx.ScoreLeaf(
-            {.idf = value.idf,
-             .term_frequency = 1,
-             .doc_len = doc_len,
-             .leaf_weight = predicate->GetWeight()});
-      }
-      // Each prefix contributes ONE matched value (the doc's first), never the
-      // sum; a union still sums.
-      for (absl::string_view prefix : leaf.tag_prefixes) {
-        const size_t dt =
-            score_ctx.query_ctx.TagPrefixDocCount(*tag_index, prefix, key);
-        if (dt == 0) continue;
-        sum += score_ctx.query_ctx.ScoreLeaf(
-            {.idf = score_ctx.query_ctx.Idf(dt),
-             .term_frequency = 1,
-             .doc_len = doc_len,
-             .leaf_weight = predicate->GetWeight()});
-      }
-      return sum;
-    }
-    // Vector range and negate are filters; they never affect text relevance.
-    case PredicateType::kVectorRange:
-    // kNegate is a filter already applied by the pre-filter, and kNone has no
-    // term occurrence to score; neither contributes to relevance.
-    case PredicateType::kNegate:
-    case PredicateType::kNone:
-      return 0.0f;
-  }
-  return 0.0f;
-}
-
-// Scores one admitted document: the ScoreNode walk composed with the document
-// score, sanitized. nullopt when ScoreNode re-derives a non-match; callers
-// score 0 rather than drop the document.
-std::optional<float> ScoreDocument(const Predicate *root_predicate,
-                                   BorrowedInternedStringPtr key,
-                                   ScoreContext &score_ctx) {
-  QueryContext &query_ctx = score_ctx.query_ctx;
-  score_ctx.BeginDocument();
-  std::optional<float> sum;
-  if (root_predicate != nullptr) {
-    sum = ScoreNode(root_predicate, key, score_ctx);
-  } else {
+float ScoreDocument(const Predicate *root_predicate, float sum,
+                    BorrowedInternedStringPtr key, QueryContext &query_ctx) {
+  if (root_predicate == nullptr) {
     // Match-all (`*`): Redis scores the wildcard as a single BM25 leaf with a
     // constant IDF (1.0) and term frequency (1), normalized by the document's
     // text length. On a text-less index avg_doc_len is 0 and ScoreLeaf
@@ -1599,12 +1391,11 @@ std::optional<float> ScoreDocument(const Predicate *root_predicate,
                                .doc_len = query_ctx.DocLen(key),
                                .leaf_weight = 1.0f});
   }
-  if (!sum) return std::nullopt;
   return SanitizeScore(
-      query_ctx.Scorer()->ComposeDocumentScore(*sum, query_ctx.DocScore(key)));
+      query_ctx.Scorer()->ComposeDocumentScore(sum, query_ctx.DocScore(key)));
 }
 
-void ScoreTextQuery(const Predicate *root_predicate,
+void ScoreTextQuery(const SearchParameters &parameters,
                     std::vector<indexes::BorrowedNeighbor> &candidates,
                     QueryContext &query_ctx) {
   if (candidates.empty() || options::IsScoringDisabled()) return;
@@ -1613,20 +1404,25 @@ void ScoreTextQuery(const Predicate *root_predicate,
   // "no scores" rather than aborting if the invariant ever breaks. Candidates
   // keep their initial 0.0 score.
   if (query_ctx.Stats().total_docs == 0) return;
-  ScoreContext score_ctx{query_ctx};
-
-  std::vector<indexes::BorrowedNeighbor> scored;
-  scored.reserve(candidates.size());
-  for (const auto &candidate : candidates) {
-    // Non-owning view: scoring runs under the shared index lock, so the
-    // InternedString outlives the loop and no ref-count churn is needed.
-    const BorrowedInternedStringPtr &key = candidate.key;
-    scored.push_back(
-        {candidate.key, 0.0f,
-         ScoreDocument(root_predicate, key, score_ctx).value_or(0.0f)});
+  const Predicate *root = parameters.filter_parse_results.root_predicate.get();
+  // Every leaf is evaluated, the text children the entries fetchers resolved
+  // included: they carry the BM25.
+  indexes::PrefilterEvaluator evaluator(
+      query_ctx, parameters.filter_parse_results.query_operations,
+      *parameters.index_schema, /*source_resolves_text=*/false,
+      /*scoring=*/true);
+  for (auto &candidate : candidates) {
+    float sum = 0.0f;
+    if (root != nullptr) {
+      const InternedStringPtr key = candidate.key.Materialize();
+      EvaluationResult result = evaluator.EvaluateFull(*root, key);
+      // Admitted by the pre-filter, so a non-match here keeps the document at
+      // score 0 rather than dropping it.
+      if (!result.matches) continue;
+      sum = result.score;
+    }
+    candidate.score = ScoreDocument(root, sum, candidate.key, query_ctx);
   }
-
-  candidates = std::move(scored);
 }
 
 // Sets Neighbor.score to the relevance ScoreTextQuery computes for non-vector
@@ -1641,8 +1437,7 @@ static void ApplyRelevanceScore(const SearchParameters &parameters,
     borrowed.push_back(
         {BorrowedInternedStringPtr(neighbor.external_id), 0.0f, 0.0f});
   }
-  ScoreTextQuery(parameters.filter_parse_results.root_predicate.get(), borrowed,
-                 query_ctx);
+  ScoreTextQuery(parameters, borrowed, query_ctx);
   for (size_t i = 0; i < neighbors.size(); ++i) {
     neighbors[i].score = borrowed[i].score;
   }
@@ -1673,19 +1468,6 @@ std::optional<absl::flat_hash_set<absl::string_view>> ReadRecordTags(
   return indexes::Tag::ParseRecordTags(
       vmsdk::ToStringView(record->second.value.get()),
       predicate.GetIndex()->GetSeparator());
-}
-
-std::optional<float> RecomputeDocumentScore(const Predicate *root_predicate,
-                                            const InternedStringPtr &key,
-                                            QueryContext &query_ctx,
-                                            const RecordsMap &records) {
-  CHECK(query_ctx.ShortLocks());
-  if (options::IsScoringDisabled() || query_ctx.Stats().total_docs == 0) {
-    return std::nullopt;
-  }
-  ScoreContext score_ctx{query_ctx, &records};
-  return ScoreDocument(root_predicate, BorrowedInternedStringPtr(key),
-                       score_ctx);
 }
 
 absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
@@ -1845,8 +1627,7 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
   // (text + numeric/tag/negate) queries and match-all, which reaches
   // ScoreTextQuery's null-predicate wildcard branch.
   if (!borrowed.empty() && !score_in_drain) {
-    ScoreTextQuery(parameters.filter_parse_results.root_predicate.get(),
-                   borrowed, *query_ctx);
+    ScoreTextQuery(parameters, borrowed, *query_ctx);
   }
   return borrowed;
 }
@@ -2120,8 +1901,8 @@ absl::Status Search(SearchParameters &parameters, SearchMode search_mode) {
                              indexes::scoring::GetScorer(parameters.scorer));
       VMSDK_ASSIGN_OR_RETURN(auto neighbors,
                              SearchVectorRangeQuery(parameters, query_ctx));
-      // The VR leaf scores 0 (ScoreNode), a plain VR query scores 0, a
-      // compound one takes its other leaves' relevance, as Redis reports.
+      // The VR leaf scores 0, so a plain VR query scores 0 and a compound one
+      // takes its other leaves' relevance, as Redis reports.
       ApplyRelevanceScore(parameters, neighbors, query_ctx);
       size_t total_count = neighbors.size();
       parameters.search_result =

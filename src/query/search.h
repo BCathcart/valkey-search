@@ -515,29 +515,25 @@ int64_t GetVectorRangeFallbackCount(indexes::RangeFallback fallback);
 // Exposed for testing.
 size_t FindVectorDelimiter(absl::string_view expr);
 
-// Scores admitted candidates in place by walking the predicate tree per
-// document. Sorting and trimming to the requested limit happen later in
-// SearchResult::TrimResults. `query_ctx` is the query's, so leaves resolved
+// Scores admitted candidates in place: one scoring-mode walk of the predicate
+// tree per document. Sorting and trimming to the requested limit happen later
+// in SearchResult::TrimResults. `query_ctx` is the query's, so leaves resolved
 // while filtering are reused here.
-void ScoreTextQuery(const Predicate *root_predicate,
+void ScoreTextQuery(const SearchParameters &parameters,
                     std::vector<indexes::BorrowedNeighbor> &candidates,
                     QueryContext &query_ctx);
+
+// A matched document's score from its scoring-mode walk: `sum` composed with
+// the document score and sanitized. A null root is match-all (`*`), which
+// scores as one wildcard BM25 leaf.
+float ScoreDocument(const Predicate *root_predicate, float sum,
+                    BorrowedInternedStringPtr key, QueryContext &query_ctx);
 
 // A revalidated document's tags for the predicate's field, read from the
 // fetched record rather than the index, which may not reflect the mutation yet.
 // nullopt when the record has no such field.
 std::optional<absl::flat_hash_set<absl::string_view>> ReadRecordTags(
     const RecordsMap &records, const TagPredicate &predicate);
-
-// Main-thread rescoring of one revalidated document, through the same ScoreNode
-// walk ScoreTextQuery runs so the result is on the shard-side scale.
-// `query_ctx` must be in kShortLocks: this runs outside any time-sliced read
-// phase and never acquires that mutex. nullopt when ScoreNode re-derives a
-// non-match; callers score 0 rather than drop the document.
-std::optional<float> RecomputeDocumentScore(const Predicate *root_predicate,
-                                            const InternedStringPtr &key,
-                                            QueryContext &query_ctx,
-                                            const RecordsMap &records);
 
 }  // namespace valkey_search::query
 #endif  // VALKEYSEARCH_SRC_QUERY_SEARCH_H_

@@ -16,6 +16,7 @@
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/match.h"
 #include "absl/strings/string_view.h"
 #include "src/attribute_data_type.h"
 #include "src/indexes/scoring/scorer.h"
@@ -27,6 +28,7 @@
 #include "src/query/query_context.h"
 #include "src/query/search.h"
 #include "src/valkey_search.h"
+#include "src/valkey_search_options.h"
 #include "vmsdk/src/info.h"
 #include "vmsdk/src/log.h"
 #include "vmsdk/src/managed_pointers.h"
@@ -89,8 +91,8 @@ class PredicateEvaluator : public query::Evaluator {
  public:
   PredicateEvaluator(const RecordsMap &records, InternedStringPtr target_key,
                      QueryContext &query_ctx, QueryOperations query_operations,
-                     const IndexSchema &index_schema)
-      : Evaluator(query_operations),
+                     const IndexSchema &index_schema, bool scoring)
+      : Evaluator(query_operations, scoring),
         records_(records),
         target_key_(std::move(target_key)),
         query_ctx_(query_ctx),
@@ -98,10 +100,31 @@ class PredicateEvaluator : public query::Evaluator {
 
   const InternedStringPtr &GetTargetKey() const override { return target_key_; }
 
+  // Membership from the record's own tags, which the index may not reflect
+  // yet; the score credits the resolved values among them.
   EvaluationResult EvaluateTags(const query::TagPredicate &predicate) override {
     auto tags = ReadRecordTags(records_, predicate);
-    return predicate.Evaluate(tags ? &*tags : nullptr,
-                              predicate.GetIndex()->IsCaseSensitive());
+    const bool case_sensitive = predicate.GetIndex()->IsCaseSensitive();
+    EvaluationResult result =
+        predicate.Evaluate(tags ? &*tags : nullptr, case_sensitive);
+    if (!Scoring() || !result.matches) return result;
+    auto carries = [&](const query::TagLeaf::Value &value) {
+      for (absl::string_view tag : *tags) {
+        if (case_sensitive ? tag == value.value
+                           : absl::EqualsIgnoreCase(tag, value.value)) {
+          return true;
+        }
+      }
+      return false;
+    };
+    result.score =
+        query_ctx_
+            .EvaluateTag(
+                std::get<query::TagLeaf>(query_ctx_.GetOrResolve(&predicate)),
+                predicate, BorrowedInternedStringPtr(target_key_),
+                /*scoring=*/true, carries)
+            .score;
+    return result;
   }
 
   EvaluationResult EvaluateNumeric(
@@ -121,8 +144,8 @@ class PredicateEvaluator : public query::Evaluator {
 
   EvaluationResult EvaluateText(const query::TextPredicate &predicate,
                                 bool require_positions) override {
-    return query::EvaluateTextLeaf(
-        query_ctx_, predicate, target_key_, require_positions,
+    return query_ctx_.EvaluateText(
+        predicate, target_key_, require_positions, Scoring(),
         [this] { return query_ctx_.PerKeyTextIndex(target_key_); });
   }
 
@@ -215,9 +238,16 @@ FilterVerification VerifyFilter(const query::SearchParameters &parameters,
         index_schema, indexes::scoring::GetScorer(parameters.scorer),
         LockMode::kShortLocks);
   }
+  // The document changed between shard-side scoring and this content fetch, so
+  // its carried Neighbor.score is stale: the same walk that rechecks membership
+  // rescores it. An empty corpus or the kill switch scores 0 rather than
+  // dropping the document.
+  const bool scoring = parameters.ScoreIsRelevance() &&
+                       !options::IsScoringDisabled() &&
+                       query_ctx->Stats().total_docs > 0;
   PredicateEvaluator evaluator(records, n.external_id, *query_ctx,
                                parameters.filter_parse_results.query_operations,
-                               index_schema);
+                               index_schema, scoring);
   // A null predicate is a match-all query: every document matches.
   EvaluationResult result = predicate != nullptr
                                 ? predicate->Evaluate(evaluator)
@@ -243,15 +273,12 @@ FilterVerification VerifyFilter(const query::SearchParameters &parameters,
     }
   }
 
-  // The document changed between shard-side scoring and this content fetch, so
-  // its carried Neighbor.score is stale; recompute it through the same Scorer
-  // seam ScoreTextQuery uses.
   if (parameters.ScoreIsRelevance()) {
-    // nullopt (empty corpus / non-match) degrades to 0 rather than dropping the
-    // already-admitted document.
     verification.recomputed_score =
-        RecomputeDocumentScore(predicate, n.external_id, *query_ctx, records)
-            .value_or(0.0f);
+        scoring ? ScoreDocument(predicate, result.score,
+                                BorrowedInternedStringPtr(n.external_id),
+                                *query_ctx)
+                : 0.0f;
   }
   return verification;
 }
@@ -636,8 +663,8 @@ void ProcessNeighborsForReply(
 
   // Re-rank survivors when any score was recomputed: a document mutated
   // between shard-side scoring and this content fetch, so VerifyFilter
-  // recomputed its score through the same Scorer seam (RecomputeDocumentScore)
-  // and wrote it to Neighbor.score. That fresh score can reorder the survivors
+  // rescored it on the same walk that rechecked its membership and wrote the
+  // result to Neighbor.score. That fresh score can reorder the survivors
   // relative to the stale ones. The general ordering of merged cluster results
   // is handled earlier in SearchResult::TrimResults; this block only handles
   // post-recompute reordering, which happens after that sort.

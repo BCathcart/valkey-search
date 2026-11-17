@@ -49,13 +49,6 @@ struct CorpusStats {
   float default_document_score = 1.0f;
 };
 
-// What scores an expansion leaf for one document: the document's entry in a
-// matched word's postings and the idf to score it with.
-struct ExpansionMatch {
-  float idf = 0.0f;
-  indexes::text::PostingValue entry;
-};
-
 // Per-query state shared by filtering and scoring: the leaves resolved once
 // per query, the lock mode, and the scoring inputs read once up front. Not
 // thread-safe: a background Search() is one task, and the main-thread reply
@@ -74,20 +67,24 @@ class QueryContext {
   // holds one leaf while resolving a sibling.
   ResolvedLeaf &GetOrResolve(const Predicate *predicate);
 
-  // The key's entry in the word's postings, under the word's bucket in
-  // kShortLocks.
-  std::optional<indexes::text::PostingValue> Probe(
-      const WordPostings &word, BorrowedInternedStringPtr key,
-      uint64_t field_mask) const;
+  // The text dispatch both evaluators share: a term leaf is answered from the
+  // context, anything else walks the document's own tree, which
+  // `per_key_index` fetches only when reached. Under `require_positions` a
+  // match carries the iterator an enclosing AND/OR needs for its proximity
+  // check; under `scoring` it carries the leaf's BM25.
+  EvaluationResult EvaluateText(
+      const TextPredicate &predicate, const InternedStringPtr &key,
+      bool require_positions, bool scoring,
+      absl::FunctionRef<const indexes::text::TextIndex *()> per_key_index);
 
-  // For a document that misses the leaf's representative: walks the document's
-  // own tree (`per_key_index`, where the walk is bounded) for the first of the
-  // expansion's matching words it carries in the predicate's fields, and makes
-  // that word the representative if it is more common than the current one.
-  std::optional<ExpansionMatch> FindExpansionMatch(
-      ExpansionLeaf &leaf, const ExpansionPredicate &predicate,
-      const indexes::text::TextIndex &per_key_index,
-      const InternedStringPtr &key) const;
+  // A tag leaf for one document. `carries` says whether the document has a
+  // resolved value; prefixes are answered from the index. Under `scoring` the
+  // result sums one BM25 term (F ≡ 1) per value carried, and ONE per prefix:
+  // the document's first matching value, never the sum.
+  EvaluationResult EvaluateTag(
+      const TagLeaf &leaf, const TagPredicate &predicate,
+      BorrowedInternedStringPtr key, bool scoring,
+      absl::FunctionRef<bool(const TagLeaf::Value &)> carries) const;
 
   // IDF for a term carried by `dt` documents, clamped to the corpus size since
   // the two counts come from independently locked counters.
@@ -104,8 +101,6 @@ class QueryContext {
   // 0 when the scorer does not use document length.
   uint32_t DocLen(BorrowedInternedStringPtr key) const;
   float DocScore(BorrowedInternedStringPtr key) const;
-  size_t TagPrefixDocCount(const indexes::Tag &index, absl::string_view prefix,
-                           BorrowedInternedStringPtr key) const;
 
   bool ShortLocks() const { return mode_ == LockMode::kShortLocks; }
 
@@ -117,6 +112,20 @@ class QueryContext {
   ResolvedLeaf Resolve(const Predicate *predicate) const;
   ResolvedLeaf ResolveText(const TextPredicate *predicate) const;
   ResolvedLeaf ResolveTag(const TagPredicate *predicate) const;
+  EvaluationResult EvaluateTerm(const TermLeaf &leaf,
+                                const TermPredicate &predicate,
+                                const InternedStringPtr &key,
+                                bool require_positions, bool scoring) const;
+  EvaluationResult EvaluateExpansion(
+      ExpansionLeaf &leaf, const ExpansionPredicate &predicate,
+      const InternedStringPtr &key, bool require_positions, bool scoring,
+      absl::FunctionRef<const indexes::text::TextIndex *()> per_key_index)
+      const;
+  // The key's entry in the word's postings, under the word's bucket in
+  // kShortLocks.
+  std::optional<indexes::text::PostingValue> Probe(
+      const WordPostings &word, BorrowedInternedStringPtr key,
+      uint64_t field_mask) const;
   WordPostings Lookup(absl::string_view word) const;
   size_t KeyCount(const WordPostings &word) const;
   // The word only when probes will lock on it (kShortLocks).
@@ -132,14 +141,6 @@ class QueryContext {
   float avg_doc_len_;
   absl::node_hash_map<const Predicate *, ResolvedLeaf> leaf_cache_;
 };
-
-// The text dispatch both evaluators share: a term leaf is evaluated from the
-// context, anything else walks the document's own tree, which `per_key_index`
-// fetches only when reached.
-EvaluationResult EvaluateTextLeaf(
-    QueryContext &query_ctx, const TextPredicate &predicate,
-    const InternedStringPtr &key, bool require_positions,
-    absl::FunctionRef<const indexes::text::TextIndex *()> per_key_index);
 
 }  // namespace valkey_search::query
 

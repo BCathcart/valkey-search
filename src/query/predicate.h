@@ -20,9 +20,9 @@
 #include "absl/functional/function_ref.h"
 #include "absl/strings/string_view.h"
 #include "src/indexes/scoring/scorer.h"
+#include "src/indexes/text/invasive_ptr.h"
 #include "src/indexes/text/language.h"
 #include "src/indexes/text/text_iterator.h"
-#include "src/query/resolved_leaf.h"
 #include "vmsdk/src/managed_pointers.h"
 #include "vmsdk/src/type_conversions.h"
 
@@ -37,6 +37,7 @@ namespace valkey_search::indexes::text {
 class TextIterator;
 class TextIndexSchema;
 class TextIndex;
+struct Postings;
 }  // namespace valkey_search::indexes::text
 
 namespace valkey_search::indexes::scoring {
@@ -67,12 +68,8 @@ class VectorRangePredicate;
 
 struct EvaluationResult {
   bool matches;
-  // Per-document relevance score carried out of a main-thread revalidation
-  // (see response_generator.cc VerifyFilter). Only meaningful when
-  // matches == true and the caller requested a recompute; it is filled with a
-  // value produced through the same Scorer seam as the shard-side
-  // ScoreTextQuery (search.cc RecomputeDocumentScore), so it is on the same
-  // scale. Left at 0.0f on the membership-only fast path.
+  // The subtree's weighted BM25 sum when the evaluator is in scoring mode and
+  // matches is true; 0 otherwise.
   float score{0.0f};
   std::unique_ptr<valkey_search::indexes::text::TextIterator> filter_iterator;
 
@@ -100,17 +97,15 @@ struct EvaluationResult {
         vr_distance(distance) {}
 
   bool HasVrScore() const { return has_vr_distance; }
-
-  // Helper function to build EvaluationResult for text predicates
-  EvaluationResult BuildTextEvaluationResult(
-      const std::unique_ptr<indexes::text::TextIterator>& iterator,
-      bool requires_position);
 };
 
 class Evaluator {
  public:
-  explicit Evaluator(valkey_search::QueryOperations query_operations)
-      : query_operations_(query_operations) {}
+  // Scoring mode re-derives membership and fills EvaluationResult::score: an
+  // OR visits every child and sums instead of settling on the first match.
+  explicit Evaluator(valkey_search::QueryOperations query_operations,
+                     bool scoring = false)
+      : query_operations_(query_operations), scoring_(scoring) {}
   virtual ~Evaluator() = default;
   virtual EvaluationResult EvaluateText(const TextPredicate& predicate,
                                         bool require_positions) = 0;
@@ -128,9 +123,11 @@ class Evaluator {
   valkey_search::QueryOperations GetQueryOperations() const {
     return query_operations_;
   }
+  bool Scoring() const { return scoring_; }
 
  protected:
   valkey_search::QueryOperations query_operations_;
+  bool scoring_;
 };
 
 class Predicate;
@@ -203,13 +200,6 @@ class TagPredicate : public Predicate {
   // Evaluate against tags (string_view set from indexed data or parsed query)
   EvaluationResult Evaluate(const absl::flat_hash_set<absl::string_view>* tags,
                             bool case_sensitive) const;
-  // One bag probe per exact value; only if none hits and the predicate carries
-  // a prefix value does it fall back to the document's own tags. Same verdict
-  // as Evaluate(GetValue(key)): rax keys are stored with the ASCII folding
-  // EqualsIgnoreCase applies, both sides are whitespace-stripped, and query
-  // values are already unescaped.
-  EvaluationResult Evaluate(const TagLeaf& leaf,
-                            const InternedStringPtr& target_key) const;
   const indexes::Tag* GetIndex() const { return index_; }
   absl::string_view GetAlias() const { return alias_; }
   absl::string_view GetIdentifier() const {
@@ -351,8 +341,7 @@ class TextPredicate : public Predicate {
 
 // A text leaf whose matching words are only known per corpus (prefix, suffix,
 // fuzzy): evaluation walks the document's own tree rather than a resolved word
-// list. `lock` is for the main thread, which runs outside the time-sliced read
-// phase and probes each matched word's shared Postings under its bucket.
+// list.
 class ExpansionPredicate : public TextPredicate {
  public:
   using MatchSink = absl::FunctionRef<bool(
@@ -364,10 +353,6 @@ class ExpansionPredicate : public TextPredicate {
   virtual void ForEachMatch(
       const valkey_search::indexes::text::TextIndex& text_index,
       MatchSink sink) const = 0;
-  EvaluationResult Evaluate(
-      const valkey_search::indexes::text::TextIndex& text_index,
-      const InternedStringPtr& target_key, bool require_positions,
-      bool lock) const;
   // One KeyIterator per matched word of the global tree; the scored iterator
   // contributes one term's BM25, never the sum.
   std::unique_ptr<indexes::text::TextIterator> BuildTextIterator(
@@ -387,12 +372,6 @@ class TermPredicate : public TextPredicate {
   }
   absl::string_view GetTextString() const override { return term_; }
   EvaluationResult Evaluate(Evaluator& evaluator) const override;
-  // Probes each of the leaf's words for `target_key`, locking per word when
-  // the leaf carries words (main thread). Under `require_positions` the result
-  // carries the iterator an enclosing AND/OR needs for its proximity check.
-  EvaluationResult Evaluate(const TermLeaf& leaf,
-                            const InternedStringPtr& target_key,
-                            bool require_positions) const;
   std::unique_ptr<indexes::text::TextIterator> BuildTextIterator(
       const std::shared_ptr<indexes::text::TextIndex>& text_index,
       FieldMaskPredicate field_mask, bool require_positions,

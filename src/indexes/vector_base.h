@@ -804,8 +804,8 @@ class PrefilterEvaluator : public query::Evaluator {
   // Built once per query and reused across candidates.
   PrefilterEvaluator(query::QueryContext &query_ctx,
                      QueryOperations query_operations,
-                     const IndexSchema &index_schema,
-                     bool source_resolves_text);
+                     const IndexSchema &index_schema, bool source_resolves_text,
+                     bool scoring = false);
   bool Evaluate(const query::Predicate &predicate,
                 const InternedStringPtr &key);
   // Like Evaluate(), but returns the full EvaluationResult so that callers

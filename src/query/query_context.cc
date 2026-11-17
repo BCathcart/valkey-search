@@ -90,12 +90,6 @@ float QueryContext::DocScore(BorrowedInternedStringPtr key) const
                       : index_schema_.GetDocumentScore(key);
 }
 
-size_t QueryContext::TagPrefixDocCount(const indexes::Tag &index,
-                                       absl::string_view prefix,
-                                       BorrowedInternedStringPtr key) const {
-  return index.GetPrefixMatchDocCount(prefix, key, ShortLocks());
-}
-
 size_t QueryContext::KeyCount(const WordPostings &word) const {
   auto get = [&] { return word.postings->GetKeyCount(); };
   return ShortLocks() ? text_index_schema_->WithWordLock(*word.word, get)
@@ -154,36 +148,6 @@ ResolvedLeaf QueryContext::Resolve(const Predicate *predicate) const {
     default:
       return std::monostate{};
   }
-}
-
-std::optional<ExpansionMatch> QueryContext::FindExpansionMatch(
-    ExpansionLeaf &leaf, const ExpansionPredicate &predicate,
-    const indexes::text::TextIndex &per_key_index,
-    const InternedStringPtr &key) const {
-  const uint64_t field_mask = predicate.GetFieldMask();
-  std::optional<ExpansionMatch> found;
-  predicate.ForEachMatch(
-      per_key_index,
-      [&](absl::string_view word,
-          const indexes::text::InvasivePtr<indexes::text::Postings> &postings) {
-        // Entry and df under one bucket hold.
-        auto get = [&] {
-          return std::pair{postings->GetPostingValue(
-                               BorrowedInternedStringPtr(key), field_mask),
-                           postings->GetKeyCount()};
-        };
-        auto [entry, df] =
-            ShortLocks() ? text_index_schema_->WithWordLock(word, get) : get();
-        if (!entry) return true;
-        const float idf = Idf(df);
-        if (!leaf.representative || leaf.representative->df < df) {
-          leaf.representative.emplace(
-              ExpansionLeaf::Term{{LockWord(word), postings}, df, idf});
-        }
-        found.emplace(ExpansionMatch{idf, *entry});
-        return false;
-      });
-  return found;
 }
 
 ResolvedLeaf QueryContext::ResolveText(const TextPredicate *predicate) const {
@@ -282,19 +246,177 @@ ResolvedLeaf QueryContext::ResolveTag(const TagPredicate *tag_pred) const {
   return leaf;
 }
 
-EvaluationResult EvaluateTextLeaf(
-    QueryContext &query_ctx, const TextPredicate &predicate,
-    const InternedStringPtr &key, bool require_positions,
+EvaluationResult QueryContext::EvaluateText(
+    const TextPredicate &predicate, const InternedStringPtr &key,
+    bool require_positions, bool scoring,
     absl::FunctionRef<const indexes::text::TextIndex *()> per_key_index) {
-  if (const auto *leaf =
-          std::get_if<TermLeaf>(&query_ctx.GetOrResolve(&predicate))) {
-    return static_cast<const TermPredicate &>(predicate).Evaluate(
-        *leaf, key, require_positions);
+  ResolvedLeaf &resolved = GetOrResolve(&predicate);
+  if (auto *leaf = std::get_if<TermLeaf>(&resolved)) {
+    return EvaluateTerm(*leaf, static_cast<const TermPredicate &>(predicate),
+                        key, require_positions, scoring);
+  }
+  return EvaluateExpansion(std::get<ExpansionLeaf>(resolved),
+                           static_cast<const ExpansionPredicate &>(predicate),
+                           key, require_positions, scoring, per_key_index);
+}
+
+namespace {
+
+using PositionMaps = indexes::text::SingleKeyTermIterator::PositionMaps;
+
+// The result of a text leaf that matched. The raw predicate mask, not a
+// group's collapsed one: TermIterator intersects QueryFieldMask() across AND
+// children.
+EvaluationResult TextMatch(const InternedStringPtr &key,
+                           const PositionMaps &maps, uint64_t field_mask,
+                           bool require_positions, float score) {
+  EvaluationResult result(true);
+  if (require_positions) {
+    auto iterator = std::make_unique<indexes::text::SingleKeyTermIterator>(
+        key, maps, field_mask);
+    if (!iterator->IsIteratorValid()) return EvaluationResult(false);
+    result.filter_iterator = std::move(iterator);
+  }
+  result.score = score;
+  return result;
+}
+
+}  // namespace
+
+// The leaf names every word (exact, stem root, inflections) with its shared
+// postings, so one probe per word answers the key. Scored as one BM25 term per
+// group, tf summed over the group's words; doc_len rides on the same entry.
+// A position map stays valid after its word's bucket is released: only
+// removing the key frees it, which cannot be in flight for a key under
+// evaluation.
+EvaluationResult QueryContext::EvaluateTerm(const TermLeaf &leaf,
+                                            const TermPredicate &predicate,
+                                            const InternedStringPtr &key,
+                                            bool require_positions,
+                                            bool scoring) const {
+  PositionMaps maps;
+  bool matched = false;
+  float score = 0.0f;
+  for (const TermGroup &group : leaf.groups) {
+    uint32_t tf = 0;
+    uint32_t doc_len = 0;
+    for (const WordPostings &word : group.words) {
+      auto entry =
+          Probe(word, BorrowedInternedStringPtr(key), group.field_mask);
+      if (!entry) continue;
+      if (!scoring && !require_positions) return EvaluationResult(true);
+      matched = true;
+      tf += entry->doc_stats.tf;
+      doc_len = entry->doc_stats.doc_len;
+      if (require_positions) maps.push_back(entry->map);
+    }
+    if (scoring && tf != 0) {
+      score += ScoreLeaf({.idf = group.idf,
+                          .term_frequency = tf,
+                          .doc_len = doc_len,
+                          .leaf_weight = predicate.GetWeight()});
+    }
+  }
+  if (!matched) return EvaluationResult(false);
+  return TextMatch(key, maps, predicate.GetFieldMask(), require_positions,
+                   score);
+}
+
+// The document's own tree is walked for the matching words it carries, each
+// probed for the key. Scored as ONE matched word's BM25, never the sum: the
+// leaf's representative when the document carries it, else the first word
+// the walk yields, which becomes the representative if it is more common.
+// The field gate matters on both routes: without it a word the document
+// carries only in another field would supply the idf and tf.
+EvaluationResult QueryContext::EvaluateExpansion(
+    ExpansionLeaf &leaf, const ExpansionPredicate &predicate,
+    const InternedStringPtr &key, bool require_positions, bool scoring,
+    absl::FunctionRef<const indexes::text::TextIndex *()> per_key_index) const {
+  std::optional<float> score;
+  auto score_word = [&](float idf, const indexes::text::PostingValue &entry) {
+    score = ScoreLeaf({.idf = idf,
+                       .term_frequency = entry.doc_stats.tf,
+                       .doc_len = entry.doc_stats.doc_len,
+                       .leaf_weight = predicate.GetWeight()});
+  };
+  PositionMaps maps;
+  if (scoring && leaf.representative) {
+    if (auto entry = Probe(leaf.representative->term,
+                           BorrowedInternedStringPtr(key), leaf.field_mask)) {
+      score_word(leaf.representative->idf, *entry);
+      if (!require_positions) {
+        return TextMatch(key, maps, predicate.GetFieldMask(), false, *score);
+      }
+    }
   }
   const auto *index = per_key_index();
   if (index == nullptr) return EvaluationResult(false);
-  return static_cast<const ExpansionPredicate &>(predicate).Evaluate(
-      *index, key, require_positions, query_ctx.ShortLocks());
+  bool matched = score.has_value();
+  predicate.ForEachMatch(
+      *index,
+      [&](absl::string_view word,
+          const indexes::text::InvasivePtr<indexes::text::Postings> &postings) {
+        // Entry and df under one bucket hold.
+        auto get = [&] {
+          return std::pair{postings->GetPostingValue(
+                               BorrowedInternedStringPtr(key), leaf.field_mask),
+                           postings->GetKeyCount()};
+        };
+        auto [entry, df] =
+            ShortLocks() ? text_index_schema_->WithWordLock(word, get) : get();
+        if (!entry) return true;
+        matched = true;
+        if (require_positions) maps.push_back(entry->map);
+        if (scoring && !score) {
+          const float idf = Idf(df);
+          if (!leaf.representative || leaf.representative->df < df) {
+            leaf.representative.emplace(
+                ExpansionLeaf::Term{{LockWord(word), postings}, df, idf});
+          }
+          score_word(idf, *entry);
+        }
+        // A bare verdict is settled by the first hit; positions need every
+        // word.
+        return require_positions;
+      });
+  if (!matched) return EvaluationResult(false);
+  return TextMatch(key, maps, predicate.GetFieldMask(), require_positions,
+                   score.value_or(0.0f));
+}
+
+// A tag value is scored as a BM25 term with F ≡ 1 (term frequency is not
+// counted): IDF over the per-tag-value document count, normalized by the
+// document's TEXT length, honoring $weight. Doc-length inputs come from the
+// index's TEXT field; on a text-less index avg_doc_len is 0 and ScoreLeaf
+// returns 0 (a well-defined score, not Redis's nan).
+EvaluationResult QueryContext::EvaluateTag(
+    const TagLeaf &leaf, const TagPredicate &predicate,
+    BorrowedInternedStringPtr key, bool scoring,
+    absl::FunctionRef<bool(const TagLeaf::Value &)> carries) const {
+  EvaluationResult result(false);
+  std::optional<uint32_t> doc_len;
+  auto credit = [&](float idf) {
+    result.matches = true;
+    if (!scoring) return;
+    if (!doc_len) doc_len = DocLen(key);
+    result.score += ScoreLeaf({.idf = idf,
+                               .term_frequency = 1,
+                               .doc_len = *doc_len,
+                               .leaf_weight = predicate.GetWeight()});
+  };
+  for (const TagLeaf::Value &value : leaf.tag_values) {
+    if (!carries(value)) continue;
+    credit(value.idf);
+    if (!scoring) return result;
+  }
+  for (absl::string_view prefix : leaf.tag_prefixes) {
+    const size_t dt =
+        predicate.GetIndex()->GetPrefixMatchDocCount(prefix, key, ShortLocks());
+    if (dt == 0) continue;
+    credit(Idf(dt));
+    if (!scoring) return result;
+  }
+  return result;
 }
 
 }  // namespace valkey_search::query
