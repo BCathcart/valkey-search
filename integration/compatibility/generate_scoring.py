@@ -130,3 +130,7 @@ class TestScoringCompatibility(BaseCompatibilityTest):
 
     def test_scoring_text_numeric_tag_vector(self, key_type, schema_type):
         self._run_shape("text_numeric_tag_vector", key_type, schema_type)
+
+    def test_scoring_or_filtered_and(self, key_type, schema_type):
+        self._run_shape("or_filtered_and", key_type, schema_type)
+        self._run_shape("or_filtered_and_with_knn", key_type, schema_type)

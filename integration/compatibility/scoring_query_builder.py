@@ -36,6 +36,8 @@ SHAPE_COUNTS = {
     "tag_only": 200,
     "text_vector": 200,
     "text_numeric_tag_vector": 200,
+    "or_filtered_and": 200,
+    "or_filtered_and_with_knn": 200,
 }
 
 # --- text ---
@@ -192,6 +194,12 @@ class _QueryBuilder:
         for _ in range(SHAPE_COUNTS["text_numeric_tag_vector"]):
             emit("text_numeric_tag_vector", *self._with_knn(*self._text_numeric_tag()))
 
+        for _ in range(SHAPE_COUNTS["or_filtered_and"]):
+            emit("or_filtered_and", *self._or_filtered_and())
+
+        for _ in range(SHAPE_COUNTS["or_filtered_and_with_knn"]):
+            emit("or_filtered_and_with_knn", *self._with_knn(*self._or_filtered_and()))
+
         return self.shapes
 
     def _emit(self, shape, query, hits, params=()):
@@ -336,6 +344,26 @@ class _QueryBuilder:
             tag = f"({tag})"
         return (f"{text} @n1:[{low} {high}] {tag}",
                 text_hits & set(range(low, high + 1)) & self._tag_hits(values))
+
+    def _or_filtered_and(self):
+        """(query, hits) for `(<text> <filter>) | <text>`, in either branch
+        order. Both terms come from one anchor doc, which fails the filter: a tag
+        it does not carry, an @n1 window that excludes it, or a negated term it
+        holds. So the anchor is a hit through the bare branch only."""
+        rng = self.rng
+        doc, (text, other, negated) = self._terms_from_doc(3)
+        kind = rng.choice(["tag", "numeric", "negate"])
+        if kind == "tag":
+            value = rng.choice(sorted(v for v in SCORING_TAG_FREQS if v != self.docs[doc]["t1"]))
+            filt, filter_hits = f"@t1:{{{value}}}", self.tag_docs[value]
+        elif kind == "numeric":
+            low, high = rng.choice([r for r in NUMERIC_RANGES if not r[0] <= doc <= r[1]])
+            filt, filter_hits = f"@n1:[{low} {high}]", set(range(low, high + 1))
+        else:
+            filt, filter_hits = f"-{negated}", set(self.docs) - self.hits[negated]
+        filtered = f"({text} {filt})"
+        query = f"{filtered} | {other}" if rng.random() < 0.5 else f"{other} | {filtered}"
+        return query, (self.hits[text] & filter_hits) | self.hits[other]
 
     # --- vector ---
 
