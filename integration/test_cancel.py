@@ -19,8 +19,10 @@ def canceller(client, client_id):
     client.execute_command("client kill id ", client_id)
 
 
-def search_command(index: str, filter: Union[int, None], enable_partial_results: bool = True, enable_consistency: bool = False) -> list[str]:
+def search_command(index: str, filter: Union[int, None], enable_partial_results: bool = True, enable_consistency: bool = False, timeout_ms: int = 10000) -> list[str]:
     predicate = "*" if filter is None else f"(@n:[0 {filter}])"
+    # The default long TIMEOUT leaves the cancellation to ForceTimeout, so a
+    # slow or loaded shard counts it as a forced cancel, not a timeout.
     return [
         "FT.SEARCH",
         index,
@@ -30,7 +32,7 @@ def search_command(index: str, filter: Union[int, None], enable_partial_results:
         "BLOB",
         float_to_bytes([10.0, 10.0, 10.0]),
         "TIMEOUT",
-        "10",
+        str(timeout_ms),
         "SOMESHARDS" if enable_partial_results else "ALLSHARDS",
         "CONSISTENT" if enable_consistency else "INCONSISTENT"
     ]
@@ -44,22 +46,23 @@ def search(
     filter: Union[int, None] = None,
     enable_partial_results: bool = True,
     expect_consistency_error = False,
-    enable_consistency: bool = False
+    enable_consistency: bool = False,
+    timeout_ms: int = 10000
 ) -> list[tuple[str, float]]:
-    print("Search command: ", search_command(index, filter, enable_partial_results, enable_consistency))
+    print("Search command: ", search_command(index, filter, enable_partial_results, enable_consistency, timeout_ms))
     if expect_consistency_error:
         try:
-            x = client.execute_command(*search_command(index, filter, enable_partial_results, enable_consistency))
+            x = client.execute_command(*search_command(index, filter, enable_partial_results, enable_consistency, timeout_ms))
             assert False, "Expected error, but got result: " + str(x)
         except ResponseError as e:
             print(e)
             assert str(e) == "Index or slot consistency check failed"
         return []
     elif not timeout:
-        return client.execute_command(*search_command(index, filter, enable_partial_results, enable_consistency))
+        return client.execute_command(*search_command(index, filter, enable_partial_results, enable_consistency, timeout_ms))
     else:
         try:
-            x = client.execute_command(*search_command(index, filter, enable_partial_results, enable_consistency))
+            x = client.execute_command(*search_command(index, filter, enable_partial_results, enable_consistency, timeout_ms))
             assert False, "Expected timeout, but got result: " + str(x)
         except ResponseError as e:
             assert str(e) == "Search operation cancelled due to timeout"
@@ -285,7 +288,7 @@ class TestCancelCMD(ValkeySearchTestCaseDebugMode):
         )
         assert(client.execute_command("FT._DEBUG PAUSEPOINT LIST") == [b"Cancel", []])
 
-        hnsw_result = search(client, "hnsw", True, 2, enable_partial_results=False)
+        hnsw_result = search(client, "hnsw", True, 2, enable_partial_results=False, timeout_ms=10)
         waiters.wait_for_true(lambda: client.execute_command("FT._DEBUG PAUSEPOINT TEST Cancel") > 0)
         w = client.execute_command("FT._DEBUG PAUSEPOINT LIST")
         assert(w[0] == b'Cancel')

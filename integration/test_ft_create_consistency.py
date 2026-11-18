@@ -116,7 +116,10 @@ class TestFTCreateConsistency(ValkeySearchClusterTestCaseDebugMode):
         res = next(iter(results.values()))
         err = next(iter(exceptions.values()))
         assert "OK" in str(res)
-        assert "Unable to contact all cluster members" in str(err)
+        # The loser either collided with the winner's in-flight create or
+        # saw the winner's index already applied.
+        assert ("Unable to contact all cluster members" in str(err)
+                or "already exists" in str(err))
     
     # simulate a remote node failure, should return error
     def test_create_timeout(self):

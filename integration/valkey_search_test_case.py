@@ -79,6 +79,11 @@ class ReplicationGroup:
         node_id: bytes = self.primary.client.cluster("MYID")
         node_id = node_id.decode("utf-8")
         for replica in self.replicas:
+            # CLUSTER REPLICATE rejects a primary the replica has not yet
+            # learned of through gossip.
+            waiters.wait_for_true(
+                lambda: any(n["node_id"] == node_id for n in replica.client.cluster("NODES").values())
+            )
             replica.client.execute_command(f"CLUSTER REPLICATE {node_id}")
         self._wait_for_replication()
 
